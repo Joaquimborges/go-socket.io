@@ -5,10 +5,16 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/Joaquimborges/go-socket.io/engineio/packet"
 	"github.com/Joaquimborges/go-socket.io/engineio/transport"
 	"github.com/Joaquimborges/go-socket.io/logger"
+)
+
+const (
+	// EngineIOVersion is the Engine.IO protocol version used for client dials.
+	EngineIOVersion = "4"
 )
 
 // Dialer is dialer configure.
@@ -26,7 +32,7 @@ func (d *Dialer) Dial(urlStr string, requestHeader http.Header) (Conn, error) {
 	}
 
 	query := u.Query()
-	query.Set("EIO", "3")
+	query.Set("EIO", EngineIOVersion)
 	u.RawQuery = query.Encode()
 
 	var conn transport.Conn
@@ -83,6 +89,7 @@ func (d *Dialer) Dial(urlStr string, requestHeader http.Header) (Conn, error) {
 				}
 			}()
 		}
+
 		if err != nil {
 			logger.Error("transport dialer:", err)
 
@@ -96,7 +103,16 @@ func (d *Dialer) Dial(urlStr string, requestHeader http.Header) (Conn, error) {
 			close:     make(chan struct{}),
 		}
 
-		go ret.serve()
+		deadline := time.Now().Add(params.PingInterval + params.PingTimeout)
+		if err = conn.SetReadDeadline(deadline); err != nil {
+			logger.Error("set initial read deadline:", err)
+
+			if closeErr := conn.Close(); closeErr != nil {
+				logger.Error("close connect:", closeErr)
+			}
+
+			continue
+		}
 
 		return ret, nil
 	}

@@ -49,6 +49,7 @@ func (c *client) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.close)
 	})
+
 	return c.conn.Close()
 }
 
@@ -60,12 +61,29 @@ func (c *client) NextReader() (session.FrameType, io.ReadCloser, error) {
 		}
 
 		switch pt {
+		case packet.PING:
+			if err = r.Close(); err != nil {
+				logger.Error("close reader after ping:", err)
+			}
+
+			if err = c.respondPong(); err != nil {
+				return 0, nil, err
+			}
+
 		case packet.PONG:
-			if err = c.conn.SetReadDeadline(time.Now().Add(c.params.PingInterval + c.params.PingTimeout)); err != nil {
+			if err = r.Close(); err != nil {
+				logger.Error("close reader after pong:", err)
+			}
+
+			if err = c.resetReadDeadline(); err != nil {
 				return 0, nil, err
 			}
 
 		case packet.CLOSE:
+			if err = r.Close(); err != nil {
+				logger.Error("close reader after close packet:", err)
+			}
+
 			if err = c.Close(); err != nil {
 				logger.Error("close client with packet close:", err)
 			}
@@ -74,10 +92,11 @@ func (c *client) NextReader() (session.FrameType, io.ReadCloser, error) {
 
 		case packet.MESSAGE:
 			return session.FrameType(ft), r, nil
-		}
 
-		if err = r.Close(); err != nil {
-			logger.Error("close reader:", err)
+		default:
+			if err = r.Close(); err != nil {
+				logger.Error("close reader:", err)
+			}
 		}
 	}
 }
@@ -102,35 +121,19 @@ func (c *client) RemoteHeader() http.Header {
 	return c.conn.RemoteHeader()
 }
 
-func (c *client) serve() {
-	defer func() {
-		if closeErr := c.conn.Close(); closeErr != nil {
-			logger.Error("close connect:", closeErr)
-		}
-	}()
-
-	for {
-		select {
-		case <-c.close:
-			return
-		case <-time.After(c.params.PingInterval):
-		}
-
-		w, err := c.conn.NextWriter(frame.String, packet.PING)
-		if err != nil {
-			logger.Error("get next writer with string frame and packet ping:", err)
-
-			return
-		}
-
-		if err = w.Close(); err != nil {
-			logger.Error("close writer:", err)
-
-			return
-		}
-
-		if err = c.conn.SetWriteDeadline(time.Now().Add(c.params.PingInterval + c.params.PingTimeout)); err != nil {
-			logger.Error("set writer deadline:", err)
-		}
+func (c *client) respondPong() error {
+	w, err := c.conn.NextWriter(frame.String, packet.PONG)
+	if err != nil {
+		return err
 	}
+
+	if err = w.Close(); err != nil {
+		return err
+	}
+
+	return c.resetReadDeadline()
+}
+
+func (c *client) resetReadDeadline() error {
+	return c.conn.SetReadDeadline(time.Now().Add(c.params.PingInterval + c.params.PingTimeout))
 }
