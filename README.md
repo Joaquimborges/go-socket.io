@@ -6,7 +6,11 @@ Fork privado de [googollee/go-socket.io](https://github.com/googollee/go-socket.
 
 ## Status
 
-A biblioteca está em evolução ativa. A API abaixo é o alvo; partes do código legado (servidor, namespaces, ACK) ainda serão removidas nos próximos PRs.
+A biblioteca está em evolução ativa. A API abaixo é o alvo.
+
+**Concluído (PR-1):** código de servidor, exemplos em `_examples/` e dependências Redis/UUID removidos.
+
+**Próximos PRs:** simplificar cliente (sem namespaces/rooms/ACK), Socket.IO v4, reconnect automático, testes de integração.
 
 | Suportado (alvo) | Fora de escopo |
 |---|---|
