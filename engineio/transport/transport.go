@@ -11,6 +11,13 @@ import (
 	"github.com/Joaquimborges/go-socket.io/engineio/packet"
 )
 
+// Transport creates transport connections for dial (client) or accept (server).
+type Transport interface {
+	Name() string
+	Accept(w http.ResponseWriter, r *http.Request) (Conn, error)
+	Dial(u *url.URL, requestHeader http.Header) (Conn, error)
+}
+
 // FrameReader reads a frame. It needs be closed before next reading.
 type FrameReader interface {
 	NextReader() (frame.Type, packet.Type, io.ReadCloser, error)

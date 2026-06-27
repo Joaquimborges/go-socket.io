@@ -246,7 +246,7 @@ func (c *Client) clientRead() {
 }
 
 func (c *Client) createNamespace(ns string) *namespaceHandler {
-	handler := newNamespaceHandler(ns, nil)
+	handler := newNamespaceHandler(ns)
 	c.handlers.Set(ns, handler)
 
 	return handler

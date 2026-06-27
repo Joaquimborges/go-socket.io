@@ -14,7 +14,7 @@ func TestNamespaceHandler(t *testing.T) {
 	should := assert.New(t)
 	must := require.New(t)
 
-	h := newNamespaceHandler(t.Name(), nil)
+	h := newNamespaceHandler(t.Name())
 
 	onConnectCalled := false
 	h.OnConnect(func(c Conn) error {
@@ -103,7 +103,7 @@ func TestNamespaceHandlerEvent(t *testing.T) {
 			should := assert.New(t)
 			must := require.New(t)
 
-			h := newNamespaceHandler(test.name, nil)
+			h := newNamespaceHandler(test.name)
 			for i, e := range test.events {
 				h.OnEvent(e, test.handlers[i])
 			}

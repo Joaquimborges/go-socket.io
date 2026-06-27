@@ -1,75 +1,27 @@
-# go-engine.io
+# engineio
 
-[![GoDoc](http://godoc.org/github.com/Joaquimborges/go-socket.io/engineio?status.svg)](http://godoc.org/github.com/Joaquimborges/go-socket.io/engineio)
+Implementação Go da camada [Engine.IO](https://github.com/socketio/engine.io), usada internamente pelo cliente Socket.IO deste repositório.
 
-go-engine.io is the implement of engine.io in golang, which is transport-based cross-browser/cross-device bi-directional communication layer for [go-socket.io](https://github.com/Joaquimborges/go-socket.io).
+Suporta transporte **polling** e **WebSocket** no lado cliente (`Dialer`). O código de servidor (`Server`, session manager) foi removido — este fork é **cliente only**.
 
-It is compatible with node.js implement, and supported long-polling and websocket transport.
-
-## Install
-
-Install the package with:
-
-```bash
-go get github.com/Joaquimborges/go-socket.io/engineio@v1
-```
-
-Import it with:
+## Uso (cliente)
 
 ```go
-import "github.com/Joaquimborges/go-socket.io/engineio"
-```
-
-and use `engineio` as the package name inside the code.
-
-## Example
-
-Please check example folder for details.
-
-```go
-package main
-
 import (
-	"io/ioutil"
-	"log"
-	"net/http"
-
-	"github.com/Joaquimborges/go-socket.io/engineio"
+    "github.com/Joaquimborges/go-socket.io/engineio"
+    "github.com/Joaquimborges/go-socket.io/engineio/transport"
+    "github.com/Joaquimborges/go-socket.io/engineio/transport/websocket"
 )
 
-func main() {
-	server := engineio.NewServer(nil)
-
-	go func() {
-		for {
-			conn, err := server.Accept()
-			if err != nil {
-				log.Fatalln("accept error:", err)
-			}
-			
-			go func() {
-				defer conn.Close()
-				
-				for {
-					t, r, _ := conn.NextReader()
-					b, _ := ioutil.ReadAll(r)
-					r.Close()
-
-					w, _ := conn.NextWriter(t)
-					w.Write(b)
-					w.Close()
-				}
-			}()
-		}
-	}()
-
-	http.Handle("/engine.io/", server)
-	log.Println("Serving at localhost:5000...")
-	
-	log.Fatal(http.ListenAndServe(":5000", nil))
+dialer := engineio.Dialer{
+    Transports: []transport.Transport{websocket.Default},
 }
+
+conn, err := dialer.Dial("https://example.com/socket.io/", nil)
 ```
 
-## License
+Para a API pública de alto nível, use o pacote raiz `github.com/Joaquimborges/go-socket.io`.
 
-The 3-clause BSD License  - see [LICENSE](https://opensource.org/licenses/BSD-3-Clause) for more details
+## Licença
+
+BSD 3-Clause — ver [LICENSE](../LICENSE).
