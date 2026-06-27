@@ -6,11 +6,11 @@ import (
 	"path"
 	"strings"
 
-	"github.com/googollee/go-socket.io/engineio"
-	"github.com/googollee/go-socket.io/engineio/transport"
-	"github.com/googollee/go-socket.io/engineio/transport/polling"
-	"github.com/googollee/go-socket.io/logger"
-	"github.com/googollee/go-socket.io/parser"
+	"github.com/Joaquimborges/go-socket.io/engineio"
+	"github.com/Joaquimborges/go-socket.io/engineio/transport"
+	"github.com/Joaquimborges/go-socket.io/engineio/transport/polling"
+	"github.com/Joaquimborges/go-socket.io/logger"
+	"github.com/Joaquimborges/go-socket.io/parser"
 )
 
 var EmptyAddrErr = errors.New("empty addr")

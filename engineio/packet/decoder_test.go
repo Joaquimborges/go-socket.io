@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/googollee/go-socket.io/engineio/frame"
+	"github.com/Joaquimborges/go-socket.io/engineio/frame"
 )
 
 var tests = []struct {
