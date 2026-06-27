@@ -106,7 +106,7 @@ func (c *clientConn) servePost() {
 	for {
 		buf.Reset()
 
-		if err := c.Payload.FlushOut(&buf); err != nil {
+		if err := c.FlushOut(&buf); err != nil {
 			return
 		}
 		query.Set("t", utils.Timestamp())
@@ -114,7 +114,7 @@ func (c *clientConn) servePost() {
 
 		resp, err := c.httpClient.Do(&req)
 		if err != nil {
-			if err = c.Payload.Store("post", err); err != nil {
+			if err = c.Store("post", err); err != nil {
 				logger.Error("store post:", err)
 			}
 
@@ -128,7 +128,7 @@ func (c *clientConn) servePost() {
 		discardBody(resp.Body)
 
 		if resp.StatusCode != http.StatusOK {
-			err = c.Payload.Store("post", fmt.Errorf("invalid response: %s(%d)", resp.Status, resp.StatusCode))
+			err = c.Store("post", fmt.Errorf("invalid response: %s(%d)", resp.Status, resp.StatusCode))
 			if err != nil {
 				logger.Error("store post:", err)
 			}
@@ -157,7 +157,7 @@ func (c *clientConn) getOpen() {
 
 	resp, err := c.httpClient.Do(&req)
 	if err != nil {
-		if err = c.Payload.Store("get", err); err != nil {
+		if err = c.Store("get", err); err != nil {
 			logger.Error("getOpen store 1:", err)
 		}
 
@@ -186,7 +186,7 @@ func (c *clientConn) getOpen() {
 	}
 
 	if err != nil {
-		if err = c.Payload.Store("get", err); err != nil {
+		if err = c.Store("get", err); err != nil {
 			logger.Error("getOpen store 2:", err)
 		}
 
@@ -199,7 +199,7 @@ func (c *clientConn) getOpen() {
 
 	c.remoteHeader.Store(resp.Header)
 
-	if err = c.Payload.FeedIn(resp.Body, isSupportBinary); err != nil {
+	if err = c.FeedIn(resp.Body, isSupportBinary); err != nil {
 		logger.Error("payload feedin:", err)
 
 		return
@@ -220,7 +220,7 @@ func (c *clientConn) serveGet() {
 
 		resp, err := c.httpClient.Do(&req)
 		if err != nil {
-			if err = c.Payload.Store("get", err); err != nil {
+			if err = c.Store("get", err); err != nil {
 				logger.Error("serveGet store 1:", err)
 			}
 
@@ -247,7 +247,7 @@ func (c *clientConn) serveGet() {
 		if err != nil {
 			discardBody(resp.Body)
 
-			if err = c.Payload.Store("get", err); err != nil {
+			if err = c.Store("get", err); err != nil {
 				logger.Error("serveGet store 2:", err)
 			}
 
@@ -258,7 +258,7 @@ func (c *clientConn) serveGet() {
 			return
 		}
 
-		if err = c.Payload.FeedIn(resp.Body, isSupportBinary); err != nil {
+		if err = c.FeedIn(resp.Body, isSupportBinary); err != nil {
 			discardBody(resp.Body)
 
 			return
