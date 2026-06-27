@@ -5,16 +5,12 @@ import (
 	"reflect"
 )
 
-const (
-	goSocketIOConnInterface = "Conn"
-)
-
-type funcHandler struct {
+type eventHandler struct {
 	argTypes []reflect.Type
 	f        reflect.Value
 }
 
-func (h *funcHandler) Call(args []reflect.Value) (ret []reflect.Value, err error) {
+func (h *eventHandler) Call(args []reflect.Value) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			var ok bool
@@ -25,43 +21,16 @@ func (h *funcHandler) Call(args []reflect.Value) (ret []reflect.Value, err error
 		}
 	}()
 
-	ret = h.f.Call(args)
+	h.f.Call(args)
 
-	return
+	return nil
 }
 
-func newEventFunc(f interface{}) *funcHandler {
+func newEventHandler(f interface{}) *eventHandler {
 	fv := reflect.ValueOf(f)
 
 	if fv.Kind() != reflect.Func {
-		panic("event handler must be a func.")
-	}
-	ft := fv.Type()
-
-	if ft.NumIn() < 1 || ft.In(0).Name() != goSocketIOConnInterface {
-		panic("handler function should be like func(socketio.Conn, ...)")
-	}
-
-	argTypes := make([]reflect.Type, ft.NumIn()-1)
-	for i := range argTypes {
-		argTypes[i] = ft.In(i + 1)
-	}
-
-	if len(argTypes) == 0 {
-		argTypes = nil
-	}
-
-	return &funcHandler{
-		argTypes: argTypes,
-		f:        fv,
-	}
-}
-
-func newAckFunc(f interface{}) *funcHandler {
-	fv := reflect.ValueOf(f)
-
-	if fv.Kind() != reflect.Func {
-		panic("ack callback must be a func.")
+		panic("event handler must be a func")
 	}
 
 	ft := fv.Type()
@@ -70,11 +39,12 @@ func newAckFunc(f interface{}) *funcHandler {
 	for i := range argTypes {
 		argTypes[i] = ft.In(i)
 	}
+
 	if len(argTypes) == 0 {
 		argTypes = nil
 	}
 
-	return &funcHandler{
+	return &eventHandler{
 		argTypes: argTypes,
 		f:        fv,
 	}

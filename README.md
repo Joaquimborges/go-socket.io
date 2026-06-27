@@ -10,7 +10,9 @@ A biblioteca está em evolução ativa. A API abaixo é o alvo.
 
 **Concluído (PR-1):** código de servidor, exemplos em `_examples/` e dependências Redis/UUID removidos.
 
-**Próximos PRs:** simplificar cliente (sem namespaces/rooms/ACK), Socket.IO v4, reconnect automático, testes de integração.
+**Concluído (PR-2):** cliente mínimo — um `Client`, `On`/`OnConnect`/`OnDisconnect`/`Emit`/`Connect`/`Close`, sem namespaces/rooms/broadcast/ACK; `Emit` retorna `ErrNotConnected` se offline.
+
+**Próximos PRs:** Socket.IO v4 (EIO=4, PING→PONG, WebSocket default), reconnect automático, testes de integração.
 
 | Suportado (alvo) | Fora de escopo |
 |---|---|

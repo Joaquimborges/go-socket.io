@@ -1,15 +1,27 @@
-# More info on config here: https://github.com/golangci/golangci-lint#config-file
-run:
-  timeout: 3m
-  deadline: 5m
-
-output:
-  format: colored-line-number
-  print-issued-lines: true
-  print-linter-name: true
-
-issues:
-  exclude-use-default: false
-  exclude:
-    # support go 1.13 with deprecated APIs
-    - SA1019
+version: "2"
+linters:
+  settings:
+    staticcheck:
+      checks: ["all", "-QF1008", "-ST1003"]
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - staticcheck
+        text: SA1019
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

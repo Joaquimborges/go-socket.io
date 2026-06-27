@@ -1,37 +1,11 @@
 package socketio
 
-import (
-	"errors"
-	"fmt"
-)
+import "errors"
 
-// connect errors.
 var (
-	errUnavailableRootHandler = errors.New("root ('/') doesn't have a namespace handler")
+	// ErrEmptyAddr is returned when NewClient receives an empty address.
+	ErrEmptyAddr = errors.New("socketio: empty address")
 
-	errFailedConnectNamespace = errors.New("failed connect to namespace without handler")
+	// ErrNotConnected is returned by Emit when the client is not connected.
+	ErrNotConnected = errors.New("socketio: client not connected")
 )
-
-// common connection dispatch errors.
-var (
-	errHandleDispatch = errors.New("handler dispatch error")
-
-	errDecodeArgs = errors.New("decode args error")
-)
-
-type errorMessage struct {
-	namespace string
-
-	err error
-}
-
-func (e errorMessage) Error() string {
-	return fmt.Sprintf("error in namespace: (%s) with error: (%s)", e.namespace, e.err.Error())
-}
-
-func newErrorMessage(namespace string, err error) *errorMessage {
-	return &errorMessage{
-		namespace: namespace,
-		err:       err,
-	}
-}
