@@ -6,8 +6,8 @@ import (
 	"io"
 	"unicode/utf8"
 
-	"github.com/googollee/go-socket.io/engineio/frame"
-	"github.com/googollee/go-socket.io/engineio/packet"
+	"github.com/Joaquimborges/go-socket.io/engineio/frame"
+	"github.com/Joaquimborges/go-socket.io/engineio/packet"
 )
 
 type writerFeeder interface {

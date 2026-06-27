@@ -1,67 +1,113 @@
 # go-socket.io
 
-go-socket.io is library an implementation of [Socket.IO](http://socket.io) in Golang, which is a realtime application framework.
+Cliente [Socket.IO](https://socket.io) v4 em Go — pensado para backends que precisam de uma conexão persistente, estável e de longa duração com um servidor Socket.IO (Node.js).
 
-Current this library supports 1.4 version of the Socket.IO client. It supports room, namespaces and broadcast at now.
+Fork privado de [googollee/go-socket.io](https://github.com/googollee/go-socket.io), simplificado para **cliente only**: sem servidor, sem rooms, sem broadcast, sem ACK.
 
-**Help wanted** This project is looking for contributors to help fix bugs and implement new features. Please check [Issue 192](https://github.com/googollee/go-socket.io/issues/192). All help is much appreciated.
+## Status
+
+A biblioteca está em evolução ativa. A API abaixo é o alvo; partes do código legado (servidor, namespaces, ACK) ainda serão removidas nos próximos PRs.
+
+| Suportado (alvo) | Fora de escopo |
+|---|---|
+| Conexão WebSocket + JSON | Servidor Socket.IO |
+| Namespace root (`/` ou `""`) | Rooms e broadcast |
+| `Emit` / `On` de eventos | ACK / callbacks de resposta |
+| Reconnect automático (backoff) | Namespaces customizados |
+| Heartbeat PING → PONG | Payloads binários na API pública |
+
+**Requisitos:** Go 1.26+, servidor Socket.IO **v4**, transporte WebSocket.
+
+## Instalação
+
+```bash
+go get github.com/Joaquimborges/go-socket.io
+```
+
+```go
+import socketio "github.com/Joaquimborges/go-socket.io"
+```
+
+## Uso
+
+```go
+package main
+
+import (
+    "errors"
+    "log"
+
+    socketio "github.com/Joaquimborges/go-socket.io"
+)
+
+func main() {
+    client := socketio.NewClient("https://api.example.com")
+
+    client.On("machine_connected", func(data MachineConnected) {
+        log.Println("machine connected:", data)
+    })
+
+    client.OnConnect(func() {
+        log.Println("connected") // inclui reconexões
+    })
+
+    client.OnDisconnect(func(err error) {
+        log.Println("disconnected:", err)
+    })
+
+    if err := client.Connect(); err != nil {
+        log.Fatal(err)
+    }
+
+    if err := client.Emit("show_message", map[string]any{
+        "username": "pedro",
+    }); err != nil {
+        if errors.Is(err, socketio.ErrNotConnected) {
+            log.Println("offline, evento não enviado")
+        }
+    }
+
+    // ... manter o processo vivo ...
+
+    _ = client.Close()
+}
+```
+
+### API
+
+| Método | Descrição |
+|---|---|
+| `NewClient(url)` | Cria o cliente apontando para o servidor Socket.IO |
+| `On(event, handler)` | Registra handler síncrono para um evento |
+| `OnConnect(fn)` | Chamado quando a conexão é estabelecida (1ª vez e após cada reconnect) |
+| `OnDisconnect(fn)` | Chamado quando o transporte cai, antes do backoff |
+| `Connect()` | Inicia os loops de leitura/escrita e o reconnect |
+| `Emit(event, data...)` | Envia JSON; retorna `error` (`ErrNotConnected` se offline) |
+| `Close()` | Para o reconnect e fecha a conexão |
+
+## Arquitetura
+
+```
+App → Client → engineio → WebSocket
+         ↓
+      parser
+```
+
+- **`Client`** — único ponto de entrada da API pública.
+- **`engineio/`** — camada Engine.IO (handshake, heartbeat, transporte).
+- **`parser/`** — codificação/decodificação do protocolo Socket.IO.
+
+Dois loops internos (`readLoop` + `writeLoop`) mantêm a conexão; erros fatais saem do `readLoop` e disparam reconnect com backoff (1s → 2s → … → máx. 30s).
+
+## Namespaces
+
+Apenas o namespace default é suportado. Eventos recebidos em outros namespaces (`/admin`, etc.) são descartados com log de aviso — o cliente não processa eventos fora do root por acidente.
 
 ## Badges
 
-![Build Status](https://github.com/googollee/go-socket.io/workflows/CI/badge.svg)
-[![GoDoc](http://godoc.org/github.com/googollee/go-socket.io?status.svg)](http://godoc.org/github.com/googollee/go-socket.io)
-[![License](https://img.shields.io/github/license/golangci/golangci-lint)](/LICENSE)
-[![Release](https://img.shields.io/github/release/googollee/go-socket.io.svg)](https://github.com/googollee/go-socket.io/releases/latest)
-[![Go Report Card](https://goreportcard.com/badge/github.com/googollee/go-socket.io)](https://goreportcard.com/report/github.com/googollee/go-socket.io)
+![Build Status](https://github.com/Joaquimborges/go-socket.io/workflows/CI/badge.svg)
+[![Go Report Card](https://goreportcard.com/badge/github.com/Joaquimborges/go-socket.io)](https://goreportcard.com/report/github.com/Joaquimborges/go-socket.io)
 
-## Contents
+## Licença
 
-- [Install](#install)
-- [Example](#example)
-- [FAQ](#faq)
-- [Engine.io](#engineio)
-- [Community](#community)
-- [License](#license)
-
-## Install
-
-Install the package with:
-
-```bash
-go get github.com/googollee/go-socket.io
-```
-
-Import it with:
-
-```go
-import "github.com/googollee/go-socket.io"
-```
-
-and use `socketio` as the package name inside the code.
-
-## Example
-
-Please check more examples into folder in project for details. [Examples](https://github.com/googollee/go-socket.io/tree/master/_examples)
-
-## FAQ
-
-It is some popular questions about this repository: 
-
-- Is this library supported socket.io version 2?
-    - No, but if you wanna you can help to do it. Join us in community chat Telegram   
-- How to use go-socket.io with CORS?
-    - Please see examples in [directory](https://github.com/googollee/go-socket.io/tree/master/_examples)
-
-## Community
-
-Telegram chat: [@go_socketio](https://t.me/go_socketio)
-
-## Engineio
-
-This project contains a sub-package called `engineio`. This used to be a separate package under https://github.com/googollee/go-engine.io.
-
-It contains the `engine.io` analog implementation of the original node-package. https://github.com/socketio/engine.io It can be used without the socket.io-implementation. Please check the README.md in `engineio/`.
-
-## License
-
-The 3-clause BSD License  - see [LICENSE](https://opensource.org/licenses/BSD-3-Clause) for more details
+BSD 3-Clause — ver [LICENSE](./LICENSE).
