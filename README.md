@@ -12,7 +12,9 @@ A biblioteca está em evolução ativa. A API abaixo é o alvo.
 
 **Concluído (PR-2):** cliente mínimo — um `Client`, `On`/`OnConnect`/`OnDisconnect`/`Emit`/`Connect`/`Close`, sem namespaces/rooms/broadcast/ACK; `Emit` retorna `ErrNotConnected` se offline.
 
-**Próximos PRs:** Socket.IO v4 (EIO=4, PING→PONG, WebSocket default), reconnect automático, testes de integração.
+**Concluído (PR-3):** Engine.IO v4 (`EIO=4`), heartbeat PING→PONG, dial WebSocket-only, `Connect` idempotente.
+
+**Próximos PRs:** reconnect automático, testes de integração.
 
 | Suportado (alvo) | Fora de escopo |
 |---|---|

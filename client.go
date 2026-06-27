@@ -11,7 +11,7 @@ import (
 
 	"github.com/Joaquimborges/go-socket.io/engineio"
 	"github.com/Joaquimborges/go-socket.io/engineio/transport"
-	"github.com/Joaquimborges/go-socket.io/engineio/transport/polling"
+	"github.com/Joaquimborges/go-socket.io/engineio/transport/websocket"
 	"github.com/Joaquimborges/go-socket.io/parser"
 )
 
@@ -26,6 +26,9 @@ type Client struct {
 	writeChan chan parser.Payload
 	quitChan  chan struct{}
 	closeOnce sync.Once
+
+	connectMu    sync.Mutex
+	loopsStarted bool
 
 	mu        sync.RWMutex
 	connected bool
@@ -56,18 +59,27 @@ func NewClient(addr string) (*Client, error) {
 	}
 
 	return &Client{
-		url:       u.String(),
-		events:    make(map[string]*eventHandler),
-		writeChan: make(chan parser.Payload),
-		quitChan:  make(chan struct{}),
+		url:    u.String(),
+		events: make(map[string]*eventHandler),
 	}, nil
 }
 
 // Connect dials the server and starts read/write loops.
 func (c *Client) Connect() error {
+	c.connectMu.Lock()
+	defer c.connectMu.Unlock()
+
+	if c.loopsStarted {
+		return ErrAlreadyConnected
+	}
+
 	if err := c.connectOnce(); err != nil {
 		return err
 	}
+
+	c.writeChan = make(chan parser.Payload)
+	c.quitChan = make(chan struct{})
+	c.loopsStarted = true
 
 	go c.readLoop()
 	go c.writeLoop()
@@ -80,11 +92,15 @@ func (c *Client) Close() error {
 	var err error
 
 	c.closeOnce.Do(func() {
-		close(c.quitChan)
 		c.setConnected(false)
 
 		if c.engineConn != nil {
 			err = c.engineConn.Close()
+			c.engineConn = nil
+		}
+
+		if c.quitChan != nil {
+			close(c.quitChan)
 		}
 	})
 
@@ -134,7 +150,7 @@ func (c *Client) Emit(event string, args ...interface{}) error {
 
 func (c *Client) connectOnce() error {
 	dialer := engineio.Dialer{
-		Transports: []transport.Transport{polling.Default},
+		Transports: []transport.Transport{websocket.Default},
 	}
 
 	engineConn, err := dialer.Dial(c.url, nil)

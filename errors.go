@@ -8,4 +8,7 @@ var (
 
 	// ErrNotConnected is returned by Emit when the client is not connected.
 	ErrNotConnected = errors.New("socketio: client not connected")
+
+	// ErrAlreadyConnected is returned when Connect is called more than once.
+	ErrAlreadyConnected = errors.New("socketio: client already connected")
 )
