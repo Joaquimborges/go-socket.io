@@ -2,35 +2,45 @@ package socketio
 
 import (
 	"errors"
+	"log"
 	"net/url"
 	"path"
+	"reflect"
 	"strings"
+	"sync"
 
 	"github.com/Joaquimborges/go-socket.io/engineio"
 	"github.com/Joaquimborges/go-socket.io/engineio/transport"
 	"github.com/Joaquimborges/go-socket.io/engineio/transport/polling"
-	"github.com/Joaquimborges/go-socket.io/logger"
 	"github.com/Joaquimborges/go-socket.io/parser"
 )
 
-var EmptyAddrErr = errors.New("empty addr")
-
-// Client is client for socket.io server
+// Client is a Socket.IO client for the default namespace.
 type Client struct {
-	namespace string
-	url       string
+	url string
 
-	conn     *conn
-	handlers *namespaceHandlers
+	engineConn engineio.Conn
+	encoder    *parser.Encoder
+	decoder    *parser.Decoder
 
-	opts *engineio.Options
+	writeChan chan parser.Payload
+	quitChan  chan struct{}
+	closeOnce sync.Once
+
+	mu        sync.RWMutex
+	connected bool
+
+	events     map[string]*eventHandler
+	eventsLock sync.RWMutex
+
+	onConnect    func()
+	onDisconnect func(err error)
 }
 
-// NewClient returns a server
-// addr like http://asd.com:8080/{$namespace}
-func NewClient(addr string, opts *engineio.Options) (*Client, error) {
+// NewClient creates a client for the given Socket.IO server URL.
+func NewClient(addr string) (*Client, error) {
 	if addr == "" {
-		return nil, EmptyAddrErr
+		return nil, ErrEmptyAddr
 	}
 
 	u, err := url.Parse(addr)
@@ -38,247 +48,276 @@ func NewClient(addr string, opts *engineio.Options) (*Client, error) {
 		return nil, err
 	}
 
-	namespace := fmtNS(u.Path)
-
-	// Not allowing other than default
-	u.Path = path.Join("/socket.io", namespace)
+	u.Path = path.Join("/socket.io", rootNamespace)
 	u.Path = u.EscapedPath()
+
 	if strings.HasSuffix(u.Path, "socket.io") {
 		u.Path += "/"
 	}
 
 	return &Client{
-		namespace: namespace,
 		url:       u.String(),
-		handlers:  newNamespaceHandlers(),
-		opts:      opts,
+		events:    make(map[string]*eventHandler),
+		writeChan: make(chan parser.Payload),
+		quitChan:  make(chan struct{}),
 	}, nil
 }
 
-func fmtNS(ns string) string {
-	if ns == aliasRootNamespace {
-		return rootNamespace
-	}
-
-	return ns
-}
-
+// Connect dials the server and starts read/write loops.
 func (c *Client) Connect() error {
-	dialer := engineio.Dialer{
-		Transports: []transport.Transport{polling.Default},
-	}
-
-	enginioCon, err := dialer.Dial(c.url, nil)
-	if err != nil {
+	if err := c.connectOnce(); err != nil {
 		return err
 	}
 
-	c.conn = newConn(enginioCon, c.handlers)
-
-	if err := c.conn.connectClient(); err != nil {
-		_ = c.Close()
-		if root, ok := c.handlers.Get(rootNamespace); ok && root.onError != nil {
-			root.onError(nil, err)
-		}
-
-		return err
-	}
-
-	go c.clientError()
-	go c.clientWrite()
-	go c.clientRead()
+	go c.readLoop()
+	go c.writeLoop()
 
 	return nil
 }
 
-// Close closes server.
+// Close stops the client and closes the transport.
 func (c *Client) Close() error {
-	return c.conn.Close()
+	var err error
+
+	c.closeOnce.Do(func() {
+		close(c.quitChan)
+		c.setConnected(false)
+
+		if c.engineConn != nil {
+			err = c.engineConn.Close()
+		}
+	})
+
+	return err
 }
 
-func (c *Client) Emit(event string, args ...interface{}) {
-	nsConn, ok := c.conn.namespaces.Get(c.namespace)
-	if !ok {
-		logger.Info("Connection Namespace not initialized")
-		return
+// On registers a synchronous handler for a Socket.IO event.
+func (c *Client) On(event string, f interface{}) {
+	c.eventsLock.Lock()
+	defer c.eventsLock.Unlock()
+
+	c.events[event] = newEventHandler(f)
+}
+
+// OnConnect registers a callback invoked when the Socket.IO session is established.
+func (c *Client) OnConnect(f func()) {
+	c.onConnect = f
+}
+
+// OnDisconnect registers a callback invoked when the transport fails or closes.
+func (c *Client) OnDisconnect(f func(err error)) {
+	c.onDisconnect = f
+}
+
+// Emit sends an event with JSON-encoded arguments.
+func (c *Client) Emit(event string, args ...interface{}) error {
+	if !c.isConnected() {
+		return ErrNotConnected
 	}
 
-	nsConn.Emit(event, args...)
-}
+	data := make([]interface{}, len(args)+1)
+	data[0] = event
+	copy(data[1:], args)
 
-// OnConnect set a handler function f to handle open event for namespace.
-func (c *Client) OnConnect(f func(Conn) error) {
-	h := c.getNamespace(c.namespace)
-	if h == nil {
-		h = c.createNamespace(c.namespace)
+	pkg := parser.Payload{
+		Header: parser.Header{Type: parser.Event},
+		Data:   data,
 	}
 
-	h.OnConnect(f)
+	select {
+	case c.writeChan <- pkg:
+		return nil
+	case <-c.quitChan:
+		return ErrNotConnected
+	}
 }
 
-// OnDisconnect set a handler function f to handle disconnect event for namespace.
-func (c *Client) OnDisconnect(f func(Conn, string)) {
-	h := c.getNamespace(c.namespace)
-	if h == nil {
-		h = c.createNamespace(c.namespace)
+func (c *Client) connectOnce() error {
+	dialer := engineio.Dialer{
+		Transports: []transport.Transport{polling.Default},
 	}
 
-	h.OnDisconnect(f)
-}
-
-// OnError set a handler function f to handle error for namespace.
-func (c *Client) OnError(f func(Conn, error)) {
-	h := c.getNamespace(c.namespace)
-	if h == nil {
-		h = c.createNamespace(c.namespace)
+	engineConn, err := dialer.Dial(c.url, nil)
+	if err != nil {
+		return err
 	}
 
-	h.OnError(f)
+	c.engineConn = engineConn
+	c.encoder = parser.NewEncoder(engineConn)
+	c.decoder = parser.NewDecoder(engineConn)
+
+	header := parser.Header{Type: parser.Connect}
+
+	return c.encoder.Encode(header)
 }
 
-// OnEvent set a handler function f to handle event for namespace.
-func (c *Client) OnEvent(event string, f interface{}) {
-	h := c.getNamespace(c.namespace)
-	if h == nil {
-		h = c.createNamespace(c.namespace)
-	}
-
-	h.OnEvent(event, f)
-}
-
-func (c *Client) clientError() {
+func (c *Client) readLoop() {
 	defer func() {
-		if err := c.Close(); err != nil {
-			logger.Error("close connect:", err)
-		}
+		c.setConnected(false)
+		_ = c.Close()
 	}()
-
-	for {
-		select {
-		case <-c.conn.quitChan:
-			return
-		case err := <-c.conn.errorChan:
-			logger.Error("clientError", err)
-
-			var errMsg *errorMessage
-			if !errors.As(err, &errMsg) {
-				continue
-			}
-
-			if handler := c.conn.namespace(errMsg.namespace); handler != nil {
-				if handler.onError != nil {
-					nsConn, ok := c.conn.namespaces.Get(errMsg.namespace)
-					if !ok {
-						continue
-					}
-					handler.onError(nsConn, errMsg.err)
-				}
-			}
-		}
-	}
-}
-
-func (c *Client) clientWrite() {
-	defer func() {
-		if err := c.Close(); err != nil {
-			logger.Error("close connect:", err)
-		}
-
-	}()
-
-	for {
-		select {
-		case <-c.conn.quitChan:
-			logger.Info("clientWrite Writer loop has stopped")
-			return
-		case pkg := <-c.conn.writeChan:
-			if err := c.conn.encoder.Encode(pkg.Header, pkg.Data); err != nil {
-				c.conn.onError(pkg.Header.Namespace, err)
-			}
-		}
-	}
-}
-
-func (c *Client) clientRead() {
-	defer func() {
-		if err := c.Close(); err != nil {
-			logger.Error("close connect:", err)
-		}
-	}()
-
-	var event string
 
 	for {
 		var header parser.Header
+		var event string
 
-		if err := c.conn.decoder.DecodeHeader(&header, &event); err != nil {
-			c.conn.onError(rootNamespace, err)
-
-			logger.Error("clientRead Error in Decoder", err)
+		if err := c.decoder.DecodeHeader(&header, &event); err != nil {
+			if c.onDisconnect != nil {
+				c.onDisconnect(err)
+			}
 
 			return
 		}
 
-		if header.Namespace == aliasRootNamespace {
-			header.Namespace = rootNamespace
+		if !c.validateNamespace(header.Namespace) {
+			continue
 		}
 
 		var err error
+
 		switch header.Type {
 		case parser.Ack:
-			err = ackPacketHandler(c.conn, header)
+			err = c.decoder.DiscardLast()
 		case parser.Connect:
-			err = clientConnectPacketHandler(c.conn, header)
+			err = c.handleConnect()
 		case parser.Disconnect:
-			err = clientDisconnectPacketHandler(c.conn, header)
+			err = c.handleDisconnect()
 		case parser.Event:
-			err = eventPacketHandler(c.conn, event, header)
-		default:
-
+			err = c.handleEvent(event)
 		}
 
 		if err != nil {
-			logger.Error("client read:", err)
+			log.Printf("socketio: read error: %v", err)
+
+			if c.onDisconnect != nil {
+				c.onDisconnect(err)
+			}
 
 			return
 		}
 	}
 }
 
-func (c *Client) createNamespace(ns string) *namespaceHandler {
-	handler := newNamespaceHandler(ns)
-	c.handlers.Set(ns, handler)
+func (c *Client) writeLoop() {
+	for {
+		select {
+		case <-c.quitChan:
+			return
+		case pkg := <-c.writeChan:
+			if err := c.encoder.Encode(pkg.Header, pkg.Data...); err != nil {
+				log.Printf("socketio: write error: %v", err)
 
-	return handler
+				if c.onDisconnect != nil {
+					c.onDisconnect(err)
+				}
+
+				return
+			}
+		}
+	}
 }
 
-func (c *Client) getNamespace(ns string) *namespaceHandler {
-	ret, ok := c.handlers.Get(ns)
-	if !ok {
-		return nil
-	}
+func (c *Client) validateNamespace(namespace string) bool {
+	switch namespace {
+	case "", aliasRootNamespace:
+		return true
+	default:
+		log.Printf("socketio: unsupported namespace %q, discarding packet", namespace)
+		_ = c.decoder.DiscardLast()
 
-	return ret
+		return false
+	}
 }
 
-func (c *conn) connectClient() error {
-	rootHandler, ok := c.handlers.Get(rootNamespace)
+func (c *Client) handleConnect() error {
+	if err := c.decoder.DiscardLast(); err != nil {
+		return err
+	}
+
+	c.setConnected(true)
+
+	if c.onConnect != nil {
+		c.onConnect()
+	}
+
+	return nil
+}
+
+func (c *Client) handleDisconnect() error {
+	reason := ""
+
+	args, err := c.decoder.DecodeArgs([]reflect.Type{reflect.TypeOf("")})
+	if err != nil {
+		return err
+	}
+
+	if len(args) > 0 {
+		reason, _ = args[0].Interface().(string)
+	}
+
+	c.setConnected(false)
+
+	if c.onDisconnect != nil {
+		if reason != "" {
+			c.onDisconnect(errDisconnectReason(reason))
+		} else {
+			c.onDisconnect(errServerDisconnect)
+		}
+	}
+
+	return errServerDisconnect
+}
+
+func (c *Client) handleEvent(event string) error {
+	handler, ok := c.getEventHandler(event)
 	if !ok {
-		return errUnavailableRootHandler
+		return c.decoder.DiscardLast()
 	}
 
-	root := newNamespaceConn(c, aliasRootNamespace, rootHandler.broadcast)
-	c.namespaces.Set(rootNamespace, root)
-
-	root.Join(root.Conn.ID())
-
-	c.namespaces.Range(func(ns string, nc *namespaceConn) {
-		nc.SetContext(c.Conn.Context())
-	})
-
-	header := parser.Header{
-		Type: parser.Connect,
+	args, err := c.decoder.DecodeArgs(handler.argTypes)
+	if err != nil {
+		return err
 	}
 
-	return c.encoder.Encode(header)
+	return handler.Call(args)
+}
+
+func (c *Client) getEventHandler(event string) (*eventHandler, bool) {
+	c.eventsLock.RLock()
+	defer c.eventsLock.RUnlock()
+
+	handler, ok := c.events[event]
+
+	return handler, ok
+}
+
+func (c *Client) setConnected(connected bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.connected = connected
+}
+
+func (c *Client) isConnected() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.connected
+}
+
+const (
+	aliasRootNamespace = "/"
+	rootNamespace      = ""
+)
+
+type disconnectError string
+
+func (e disconnectError) Error() string {
+	return "socketio: disconnected: " + string(e)
+}
+
+var errServerDisconnect = errors.New("socketio: server disconnect")
+
+func errDisconnectReason(reason string) error {
+	return disconnectError(reason)
 }
