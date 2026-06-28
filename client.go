@@ -47,8 +47,9 @@ type Client struct {
 	events     map[string]*eventHandler
 	eventsLock sync.RWMutex
 
-	onConnect    func()
-	onDisconnect func(err error)
+	onConnect           func()
+	onDisconnect        func(err error)
+	onReconnectAttempt  func(attempt int, backoff time.Duration, err error)
 }
 
 // NewClient creates a client for the given Socket.IO server URL.
@@ -134,6 +135,11 @@ func (c *Client) OnDisconnect(f func(err error)) {
 	c.onDisconnect = f
 }
 
+// OnReconnectAttempt registers a callback invoked when a dial attempt fails before backoff.
+func (c *Client) OnReconnectAttempt(f func(attempt int, backoff time.Duration, err error)) {
+	c.onReconnectAttempt = f
+}
+
 // Emit sends an event with JSON-encoded arguments.
 func (c *Client) Emit(event string, args ...interface{}) error {
 	if !c.isConnected() {
@@ -168,7 +174,9 @@ func (c *Client) run() {
 
 		if err := c.connectOnce(); err != nil {
 			reconnectAttempt++
-			logReconnectAttempt(reconnectAttempt, backoff, err)
+			if fn := c.onReconnectAttempt; fn != nil {
+				fn(reconnectAttempt, backoff, err)
+			}
 
 			if !c.waitBackoff(&backoff) {
 				return
@@ -236,13 +244,6 @@ func (c *Client) waitBackoff(backoff *time.Duration) bool {
 	}
 
 	return true
-}
-
-func logReconnectAttempt(attempt int, backoff time.Duration, err error) {
-	log.Println("[RECONNECT]")
-	log.Printf("attempt=%d", attempt)
-	log.Printf("backoff=%s", backoff)
-	log.Printf("error=%s", err)
 }
 
 func (c *Client) connectOnce() error {

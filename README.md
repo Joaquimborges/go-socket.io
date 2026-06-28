@@ -126,6 +126,7 @@ Handlers registados com `On()` são **síncronos** e correm na goroutine de leit
 | `On(event, handler)` | Regista handler para um evento Socket.IO |
 | `OnConnect(fn)` | Callback quando a sessão fica pronta |
 | `OnDisconnect(fn)` | Callback quando o transporte cai |
+| `OnReconnectAttempt(fn)` | Callback opcional quando um dial falha (antes do backoff) |
 | `Connect()` | Inicia conexão e reconnect automático |
 | `Emit(event, data...)` | Envia JSON; retorna `ErrNotConnected` se offline |
 | `Close()` | Para reconnect e fecha a conexão |

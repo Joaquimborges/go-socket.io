@@ -84,6 +84,13 @@ func main() {
 		log.Printf("[DISCONNECT] reason=%s", reason)
 	})
 
+	client.OnReconnectAttempt(func(attempt int, backoff time.Duration, err error) {
+		log.Println("[RECONNECT]")
+		log.Printf("attempt=%d", attempt)
+		log.Printf("backoff=%s", backoff)
+		log.Printf("error=%s", err)
+	})
+
 	if err := client.Connect(); err != nil {
 		log.Fatalf("failed to connect: %v", err)
 	}
