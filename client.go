@@ -159,6 +159,7 @@ func (c *Client) Emit(event string, args ...interface{}) error {
 
 func (c *Client) run() {
 	backoff := initialBackoff
+	reconnectAttempt := 0
 
 	for {
 		if c.closed.Load() {
@@ -166,7 +167,8 @@ func (c *Client) run() {
 		}
 
 		if err := c.connectOnce(); err != nil {
-			log.Printf("socketio: connect failed: %v", err)
+			reconnectAttempt++
+			logReconnectAttempt(reconnectAttempt, backoff, err)
 
 			if !c.waitBackoff(&backoff) {
 				return
@@ -175,6 +177,7 @@ func (c *Client) run() {
 			continue
 		}
 
+		reconnectAttempt = 0
 		backoff = initialBackoff
 
 		sessionEnd := make(chan struct{})
@@ -189,7 +192,7 @@ func (c *Client) run() {
 		}
 
 		go c.readLoop(endSession)
-		go c.writeLoop(endSession)
+		go c.writeLoop(endSession, sessionEnd)
 
 		<-sessionEnd
 		err := sessionErr
@@ -206,7 +209,9 @@ func (c *Client) run() {
 				err = errTransportLost
 			}
 
-			go fn(err)
+			go func(disconnectErr error) {
+				fn(disconnectErr)
+			}(err)
 		}
 
 		if !c.waitBackoff(&backoff) {
@@ -231,6 +236,13 @@ func (c *Client) waitBackoff(backoff *time.Duration) bool {
 	}
 
 	return true
+}
+
+func logReconnectAttempt(attempt int, backoff time.Duration, err error) {
+	log.Println("[RECONNECT]")
+	log.Printf("attempt=%d", attempt)
+	log.Printf("backoff=%s", backoff)
+	log.Printf("error=%s", err)
 }
 
 func (c *Client) connectOnce() error {
@@ -313,10 +325,12 @@ func (c *Client) readLoop(endSession func(error)) {
 	}
 }
 
-func (c *Client) writeLoop(endSession func(error)) {
+func (c *Client) writeLoop(endSession func(error), sessionEnd <-chan struct{}) {
 	for {
 		select {
 		case <-c.quitChan:
+			return
+		case <-sessionEnd:
 			return
 		case pkg := <-c.writeChan:
 			var err error

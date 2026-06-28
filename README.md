@@ -159,6 +159,79 @@ App → Client → engineio → WebSocket
 - [PLANO_EVOLUCAO_CLIENTE.md](./PLANO_EVOLUCAO_CLIENTE.md) — objetivos, decisões de design e roadmap técnico
 - [AUDITORIA_CLIENTE.md](./AUDITORIA_CLIENTE.md) — auditoria do código original (pré-refactor) e motivação do fork
 
+## Soak test (opcional)
+
+Ferramentas em `cmd/` para validar reconnect e estabilidade de goroutines/memória contra um servidor Socket.IO real. **Não fazem parte da biblioteca** — servem apenas para testes locais.
+
+### `cmd/testclient`
+
+Client de soak que emite eventos periodicamente e imprime métricas de runtime.
+
+```bash
+# Na raiz do repositório
+go run ./cmd/testclient
+go run ./cmd/testclient -url http://localhost:8083 -token 123
+```
+
+| Variável / flag | Descrição | Default |
+|---|---|---|
+| `-url` / `SOCKET_URL` | URL do servidor | `http://localhost:8083` |
+| `-token` / `SOCKET_TOKEN` | Token Bearer no handshake | `123` |
+
+**Logs de evento:** `[CONNECT]`, `[DISCONNECT]`, `[EMIT]`, `[RECEIVE]`, `[RECONNECT]`, `[REPORT]`.
+
+O `[REPORT]` periódico inclui uptime, reconnects, mensagens, memória e goroutines.
+
+Intervalos (`emitInterval`, `reportInterval`) ficam no topo de `cmd/testclient/main.go`.
+
+### `cmd/server-churn.sh`
+
+Sobe e derruba o servidor em ciclos fixos — útil para simular instabilidade de rede/host.
+
+**Fase 1:** servidor up por `CHURN_INTERVAL` segundos, depois down — repete por `CHURN_DURATION` segundos.  
+**Fase 2:** servidor estável por `STABLE_DURATION` segundos.
+
+```bash
+export SERVER_DIR=/caminho/para/seu-servidor-socket-io
+./cmd/server-churn.sh
+```
+
+| Variável | Descrição | Default |
+|---|---|---|
+| `SERVER_DIR` | Diretório do projeto do servidor (obrigatório) | — |
+| `SERVER_URL` | URL base do servidor | `http://localhost:8083` |
+| `PING_URL` | Health check HTTP | `{SERVER_URL}/v2/ping` |
+| `SOAK_SERVER_LOG` | Log do script e stdout do servidor | `$TMPDIR/go-socket-io-server-churn.log` |
+| `CHURN_INTERVAL` | Segundos com servidor up por ciclo | `30` |
+| `CHURN_DURATION` | Duração total da fase 1 (segundos) | `600` (10 min) |
+| `STABLE_DURATION` | Duração da fase 2 (segundos) | `1800` (30 min) |
+
+Requisitos: `npm run start` funcional no `SERVER_DIR`, `curl` e `lsof`.
+
+### `cmd/soak-until-100.sh`
+
+Orquestra `testclient` + churn do servidor até atingir `TARGET_RECONNECTS`. Para tudo e imprime os 3 primeiros e 3 últimos `[REPORT]` completos.
+
+```bash
+export SERVER_DIR=/caminho/para/seu-servidor-socket-io
+./cmd/soak-until-100.sh
+```
+
+| Variável | Descrição | Default |
+|---|---|---|
+| `SERVER_DIR` | Diretório do projeto do servidor (obrigatório) | — |
+| `SERVER_URL` | URL passada ao testclient | `http://localhost:8083` |
+| `TARGET_RECONNECTS` | Reconnects alvo para encerrar | `100` |
+| `CHURN_INTERVAL` | Segundos com servidor up por ciclo | `30` |
+| `SOAK_CLIENT_LOG` | Log do testclient | `$TMPDIR/go-socket-io-testclient.log` |
+| `SOAK_SERVER_LOG` | Log do servidor | `$TMPDIR/go-socket-io-server-churn.log` |
+| `SOAK_REPORTS_FILE` | Reports extraídos no final | `$TMPDIR/go-socket-io-reports.txt` |
+
+**Fluxo típico:**
+
+1. Terminal A — `./cmd/soak-until-100.sh` (client + server automatizados)
+2. Ou manual — Terminal A: `./cmd/server-churn.sh` · Terminal B: `go run ./cmd/testclient`
+
 ## Badges
 
 ![Build Status](https://github.com/Joaquimborges/go-socket.io/workflows/CI/badge.svg)
