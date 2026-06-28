@@ -1,30 +1,25 @@
 # go-socket.io
 
-Cliente [Socket.IO](https://socket.io) v4 em Go — pensado para backends que precisam de uma conexão persistente, estável e de longa duração com um servidor Socket.IO (Node.js).
+Cliente [Socket.IO](https://socket.io) v4 em Go para backends que mantêm uma conexão WebSocket persistente com um servidor Socket.IO (tipicamente Node.js).
 
-Fork privado de [googollee/go-socket.io](https://github.com/googollee/go-socket.io), simplificado para **cliente only**: sem servidor, sem rooms, sem broadcast, sem ACK.
+Fork de [googollee/go-socket.io](https://github.com/googollee/go-socket.io), reduzido a **cliente only**: uma API pequena, reconnect automático e foco em conexões de longa duração.
 
-## Status
+## O que é
 
-A biblioteca está em evolução ativa. A API abaixo é o alvo.
+Esta biblioteca implementa o protocolo **Engine.IO v4 + Socket.IO** do lado cliente. O teu serviço Go conecta-se ao servidor, recebe eventos (`On`), envia eventos (`Emit`) e reconecta sozinho quando o transporte cai.
 
-**Concluído (PR-1):** código de servidor, exemplos em `_examples/` e dependências Redis/UUID removidos.
+**Caso de uso típico:** um worker ou microserviço Go que fica ligado horas ou dias a um servidor Socket.IO, trocando JSON em eventos nomeados (ex.: `machine_connected`, `ping`, `show_message`).
 
-**Concluído (PR-2):** cliente mínimo — um `Client`, `On`/`OnConnect`/`OnDisconnect`/`Emit`/`Connect`/`Close`, sem namespaces/rooms/broadcast/ACK; `Emit` retorna `ErrNotConnected` se offline.
+## O que suporta
 
-**Concluído (PR-3):** Engine.IO v4 (`EIO=4`), heartbeat PING→PONG, dial WebSocket-only, `Connect` idempotente.
-
-**Concluído (PR-4):** reconnect automático com backoff (1s → … → 30s); `Close()` cancela o loop.
-
-**Próximo PR:** testes de integração + soak (PR-5).
-
-| Suportado (alvo) | Fora de escopo |
+| Suportado | Não suportado |
 |---|---|
-| Conexão WebSocket + JSON | Servidor Socket.IO |
-| Namespace root (`/` ou `""`) | Rooms e broadcast |
+| WebSocket + JSON | Servidor Socket.IO |
+| Namespace root (`/` ou `""`) | Rooms, broadcast, namespaces custom |
 | `Emit` / `On` de eventos | ACK / callbacks de resposta |
-| Reconnect automático (backoff) | Namespaces customizados |
-| Heartbeat PING → PONG | Payloads binários na API pública |
+| Reconnect com backoff (1s → … → 30s) | Payloads binários na API pública |
+| Heartbeat PING → PONG | Upgrade polling → WebSocket |
+| Headers HTTP no handshake (`WithHeaders`) | |
 
 **Requisitos:** Go 1.26+, servidor Socket.IO **v4**, transporte WebSocket.
 
@@ -38,70 +33,116 @@ go get github.com/Joaquimborges/go-socket.io
 import socketio "github.com/Joaquimborges/go-socket.io"
 ```
 
-## Uso
+## Uso básico
 
 ```go
 package main
 
 import (
-    "errors"
-    "log"
-    "net/http"
+	"errors"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
-    socketio "github.com/Joaquimborges/go-socket.io"
+	socketio "github.com/Joaquimborges/go-socket.io"
 )
 
 func main() {
-    client := socketio.NewClient("https://api.example.com",
-        socketio.WithHeaders(http.Header{
-            "Authorization": {"Bearer <token>"},
-        }),
-    )
+	client, err := socketio.NewClient("http://localhost:8083")
+	if err != nil {
+		log.Fatal(err)
+	}
 
-    client.On("machine_connected", func(data MachineConnected) {
-        log.Println("machine connected:", data)
-    })
+	client.On("ping", func(data any) {
+		log.Println("ping:", data)
+	})
 
-    client.OnConnect(func() {
-        log.Println("connected") // inclui reconexões
-    })
+	client.OnConnect(func() {
+		log.Println("connected")
+	})
 
-    client.OnDisconnect(func(err error) {
-        log.Println("disconnected:", err)
-    })
+	client.OnDisconnect(func(err error) {
+		log.Println("disconnected:", err)
+	})
 
-    if err := client.Connect(); err != nil {
-        log.Fatal(err)
-    }
+	if err := client.Connect(); err != nil {
+		log.Fatal(err)
+	}
 
-    if err := client.Emit("show_message", map[string]any{
-        "username": "pedro",
-    }); err != nil {
-        if errors.Is(err, socketio.ErrNotConnected) {
-            log.Println("offline, evento não enviado")
-        }
-    }
+	if err := client.Emit("show_message", map[string]any{
+		"username": "pedro",
+	}); err != nil {
+		if errors.Is(err, socketio.ErrNotConnected) {
+			log.Println("offline, evento não enviado")
+		}
+	}
 
-    // ... manter o processo vivo ...
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
 
-    _ = client.Close()
+	_ = client.Close()
 }
 ```
 
-### API
+## Autenticação e headers
 
-| Método | Descrição |
+Headers são enviados em **cada** tentativa de conexão, incluindo reconnect:
+
+```go
+import "net/http"
+
+client, err := socketio.NewClient("https://api.example.com",
+	socketio.WithHeaders(http.Header{
+		"Authorization": {"Bearer <token>"},
+	}),
+)
+```
+
+## Ciclo de vida
+
+```
+Connect()  →  dial WebSocket  →  OnConnect()
+     ↑                              │
+     │                         readLoop / writeLoop
+     │                              │
+     └── backoff ← OnDisconnect ← sessão cai
+```
+
+- **`Connect()`** — idempotente; inicia os loops e o reconnect. Chamada duplicada retorna `ErrAlreadyConnected`.
+- **`OnConnect()`** — dispara na primeira conexão **e** após cada reconnect bem-sucedido.
+- **`OnDisconnect(err)`** — dispara quando a sessão termina, **antes** do backoff. O client tenta reconectar sozinho até `Close()`.
+- **`Close()`** — cancela reconnect e fecha o transporte.
+
+Handlers registados com `On()` são **síncronos** e correm na goroutine de leitura. Evita bloqueios longos dentro do handler.
+
+## API
+
+| Símbolo | Descrição |
 |---|---|
-| `NewClient(url, opts...)` | Cria o cliente apontando para o servidor Socket.IO |
-| `WithHeaders(h)` | Headers HTTP enviados em cada dial (inclui reconnect) |
-| `On(event, handler)` | Registra handler síncrono para um evento |
-| `OnConnect(fn)` | Chamado quando a conexão é estabelecida (1ª vez e após cada reconnect) |
-| `OnDisconnect(fn)` | Chamado quando o transporte cai, antes do backoff |
-| `Connect()` | Inicia os loops de leitura/escrita e o reconnect |
-| `Emit(event, data...)` | Envia JSON; retorna `error` (`ErrNotConnected` se offline) |
-| `Close()` | Para o reconnect e fecha a conexão |
+| `NewClient(url, opts...)` | Cria o client; normaliza o path para `/socket.io/` |
+| `WithHeaders(h)` | Headers HTTP no handshake (clonados na construção) |
+| `On(event, handler)` | Regista handler para um evento Socket.IO |
+| `OnConnect(fn)` | Callback quando a sessão fica pronta |
+| `OnDisconnect(fn)` | Callback quando o transporte cai |
+| `Connect()` | Inicia conexão e reconnect automático |
+| `Emit(event, data...)` | Envia JSON; retorna `ErrNotConnected` se offline |
+| `Close()` | Para reconnect e fecha a conexão |
 
-## Arquitetura
+### Erros exportados
+
+| Erro | Quando |
+|---|---|
+| `ErrEmptyAddr` | `NewClient("")` |
+| `ErrNotConnected` | `Emit` com transporte offline |
+| `ErrAlreadyConnected` | `Connect()` chamado duas vezes |
+
+## Namespaces
+
+Apenas o namespace default é suportado. Eventos recebidos noutros namespaces (`/admin`, etc.) são descartados com log de aviso.
+
+## Arquitetura interna
 
 ```
 App → Client → engineio → WebSocket
@@ -109,15 +150,14 @@ App → Client → engineio → WebSocket
       parser
 ```
 
-- **`Client`** — único ponto de entrada da API pública.
-- **`engineio/`** — camada Engine.IO (handshake, heartbeat, transporte).
-- **`parser/`** — codificação/decodificação do protocolo Socket.IO.
+- **`Client`** — API pública e loops (`readLoop`, `writeLoop`, reconnect).
+- **`engineio/`** — handshake Engine.IO, heartbeat, dial WebSocket.
+- **`parser/`** — encode/decode do protocolo Socket.IO.
 
-Dois loops internos (`readLoop` + `writeLoop`) mantêm a conexão; erros fatais saem do `readLoop` e disparam reconnect com backoff (1s → 2s → … → máx. 30s).
+## Documentação adicional
 
-## Namespaces
-
-Apenas o namespace default é suportado. Eventos recebidos em outros namespaces (`/admin`, etc.) são descartados com log de aviso — o cliente não processa eventos fora do root por acidente.
+- [PLANO_EVOLUCAO_CLIENTE.md](./PLANO_EVOLUCAO_CLIENTE.md) — objetivos, decisões de design e roadmap técnico
+- [AUDITORIA_CLIENTE.md](./AUDITORIA_CLIENTE.md) — auditoria do código original (pré-refactor) e motivação do fork
 
 ## Badges
 
