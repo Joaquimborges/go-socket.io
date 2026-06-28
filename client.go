@@ -47,9 +47,9 @@ type Client struct {
 	events     map[string]*eventHandler
 	eventsLock sync.RWMutex
 
-	onConnect           func()
-	onDisconnect        func(err error)
-	onReconnectAttempt  func(attempt int, backoff time.Duration, err error)
+	onConnect          func()
+	onDisconnect       func(err error)
+	onReconnectAttempt func(attempt int, backoff time.Duration, err error)
 }
 
 // NewClient creates a client for the given Socket.IO server URL.
