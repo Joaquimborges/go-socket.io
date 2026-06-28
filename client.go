@@ -199,7 +199,7 @@ func (c *Client) readLoop() {
 		case parser.Disconnect:
 			err = c.handleDisconnect()
 		case parser.Event:
-			err = c.handleEvent(event)
+			err = c.handleEvent(event, header)
 		}
 
 		if err != nil {
@@ -220,7 +220,14 @@ func (c *Client) writeLoop() {
 		case <-c.quitChan:
 			return
 		case pkg := <-c.writeChan:
-			if err := c.encoder.Encode(pkg.Header, pkg.Data...); err != nil {
+			var err error
+			if len(pkg.Data) > 0 {
+				err = c.encoder.Encode(pkg.Header, pkg.Data)
+			} else {
+				err = c.encoder.Encode(pkg.Header)
+			}
+
+			if err != nil {
 				log.Printf("socketio: write error: %v", err)
 
 				if c.onDisconnect != nil {
@@ -252,8 +259,8 @@ func (c *Client) handleConnect() error {
 
 	c.setConnected(true)
 
-	if c.onConnect != nil {
-		c.onConnect()
+	if fn := c.onConnect; fn != nil {
+		go fn()
 	}
 
 	return nil
@@ -284,10 +291,18 @@ func (c *Client) handleDisconnect() error {
 	return errServerDisconnect
 }
 
-func (c *Client) handleEvent(event string) error {
+func (c *Client) handleEvent(event string, header parser.Header) error {
 	handler, ok := c.getEventHandler(event)
 	if !ok {
-		return c.decoder.DiscardLast()
+		if err := c.decoder.DiscardLast(); err != nil {
+			return err
+		}
+
+		if header.NeedAck {
+			return c.sendAck(header)
+		}
+
+		return nil
 	}
 
 	args, err := c.decoder.DecodeArgs(handler.argTypes)
@@ -295,7 +310,32 @@ func (c *Client) handleEvent(event string) error {
 		return err
 	}
 
-	return handler.Call(args)
+	if err := handler.Call(args); err != nil {
+		return err
+	}
+
+	if header.NeedAck {
+		return c.sendAck(header)
+	}
+
+	return nil
+}
+
+func (c *Client) sendAck(header parser.Header) error {
+	ack := parser.Payload{
+		Header: parser.Header{
+			Type:    parser.Ack,
+			ID:      header.ID,
+			NeedAck: true,
+		},
+	}
+
+	select {
+	case c.writeChan <- ack:
+		return nil
+	case <-c.quitChan:
+		return ErrNotConnected
+	}
 }
 
 func (c *Client) getEventHandler(event string) (*eventHandler, bool) {
