@@ -3,6 +3,7 @@ package socketio
 import (
 	"errors"
 	"log"
+	"net/http"
 	"net/url"
 	"path"
 	"reflect"
@@ -24,7 +25,8 @@ const (
 
 // Client is a Socket.IO client for the default namespace.
 type Client struct {
-	url string
+	url     string
+	headers http.Header
 
 	engineConn engineio.Conn
 	encoder    *parser.Encoder
@@ -50,7 +52,7 @@ type Client struct {
 }
 
 // NewClient creates a client for the given Socket.IO server URL.
-func NewClient(addr string) (*Client, error) {
+func NewClient(addr string, opts ...ClientOption) (*Client, error) {
 	if addr == "" {
 		return nil, ErrEmptyAddr
 	}
@@ -67,10 +69,16 @@ func NewClient(addr string) (*Client, error) {
 		u.Path += "/"
 	}
 
-	return &Client{
+	client := &Client{
 		url:    u.String(),
 		events: make(map[string]*eventHandler),
-	}, nil
+	}
+
+	for _, opt := range opts {
+		opt(client)
+	}
+
+	return client, nil
 }
 
 // Connect starts the client loops and automatic reconnect with backoff.
@@ -232,7 +240,7 @@ func (c *Client) connectOnce() error {
 		Transports: []transport.Transport{websocket.Default},
 	}
 
-	engineConn, err := dialer.Dial(c.url, nil)
+	engineConn, err := dialer.Dial(c.url, c.headers)
 	if err != nil {
 		return err
 	}

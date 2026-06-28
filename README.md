@@ -46,12 +46,17 @@ package main
 import (
     "errors"
     "log"
+    "net/http"
 
     socketio "github.com/Joaquimborges/go-socket.io"
 )
 
 func main() {
-    client := socketio.NewClient("https://api.example.com")
+    client := socketio.NewClient("https://api.example.com",
+        socketio.WithHeaders(http.Header{
+            "Authorization": {"Bearer <token>"},
+        }),
+    )
 
     client.On("machine_connected", func(data MachineConnected) {
         log.Println("machine connected:", data)
@@ -87,7 +92,8 @@ func main() {
 
 | Método | Descrição |
 |---|---|
-| `NewClient(url)` | Cria o cliente apontando para o servidor Socket.IO |
+| `NewClient(url, opts...)` | Cria o cliente apontando para o servidor Socket.IO |
+| `WithHeaders(h)` | Headers HTTP enviados em cada dial (inclui reconnect) |
 | `On(event, handler)` | Registra handler síncrono para um evento |
 | `OnConnect(fn)` | Chamado quando a conexão é estabelecida (1ª vez e após cada reconnect) |
 | `OnDisconnect(fn)` | Chamado quando o transporte cai, antes do backoff |

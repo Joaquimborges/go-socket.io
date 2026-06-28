@@ -1,6 +1,7 @@
 package socketio
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -43,4 +44,18 @@ func TestNewClientURL(t *testing.T) {
 	client, err := NewClient("http://localhost:3000")
 	require.NoError(t, err)
 	require.Equal(t, "http://localhost:3000/socket.io/", client.url)
+}
+
+func TestNewClientWithHeaders(t *testing.T) {
+	headers := http.Header{
+		"Authorization": {"Bearer token"},
+		"X-Custom":      {"value"},
+	}
+
+	client, err := NewClient("http://localhost:3000", WithHeaders(headers))
+	require.NoError(t, err)
+	require.Equal(t, headers, client.headers)
+
+	headers.Set("Authorization", "mutated")
+	require.Equal(t, "Bearer token", client.headers.Get("Authorization"))
 }
