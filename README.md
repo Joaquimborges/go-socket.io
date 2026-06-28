@@ -14,7 +14,9 @@ A biblioteca está em evolução ativa. A API abaixo é o alvo.
 
 **Concluído (PR-3):** Engine.IO v4 (`EIO=4`), heartbeat PING→PONG, dial WebSocket-only, `Connect` idempotente.
 
-**Próximos PRs:** reconnect automático, testes de integração.
+**Concluído (PR-4):** reconnect automático com backoff (1s → … → 30s); `Close()` cancela o loop.
+
+**Próximo PR:** testes de integração + soak (PR-5).
 
 | Suportado (alvo) | Fora de escopo |
 |---|---|

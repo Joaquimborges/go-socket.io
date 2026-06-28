@@ -8,11 +8,18 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/Joaquimborges/go-socket.io/engineio"
 	"github.com/Joaquimborges/go-socket.io/engineio/transport"
 	"github.com/Joaquimborges/go-socket.io/engineio/transport/websocket"
 	"github.com/Joaquimborges/go-socket.io/parser"
+)
+
+const (
+	maxReconnectBackoff = 30 * time.Second
+	initialBackoff      = time.Second
 )
 
 // Client is a Socket.IO client for the default namespace.
@@ -29,6 +36,8 @@ type Client struct {
 
 	connectMu    sync.Mutex
 	loopsStarted bool
+
+	closed atomic.Bool
 
 	mu        sync.RWMutex
 	connected bool
@@ -64,7 +73,7 @@ func NewClient(addr string) (*Client, error) {
 	}, nil
 }
 
-// Connect dials the server and starts read/write loops.
+// Connect starts the client loops and automatic reconnect with backoff.
 func (c *Client) Connect() error {
 	c.connectMu.Lock()
 	defer c.connectMu.Unlock()
@@ -73,35 +82,27 @@ func (c *Client) Connect() error {
 		return ErrAlreadyConnected
 	}
 
-	if err := c.connectOnce(); err != nil {
-		return err
-	}
-
 	c.writeChan = make(chan parser.Payload)
 	c.quitChan = make(chan struct{})
 	c.loopsStarted = true
 
-	go c.readLoop()
-	go c.writeLoop()
+	go c.run()
 
 	return nil
 }
 
-// Close stops the client and closes the transport.
+// Close stops reconnect and closes the transport.
 func (c *Client) Close() error {
 	var err error
 
 	c.closeOnce.Do(func() {
-		c.setConnected(false)
-
-		if c.engineConn != nil {
-			err = c.engineConn.Close()
-			c.engineConn = nil
-		}
+		c.closed.Store(true)
 
 		if c.quitChan != nil {
 			close(c.quitChan)
 		}
+
+		err = c.closeTransport()
 	})
 
 	return err
@@ -148,7 +149,83 @@ func (c *Client) Emit(event string, args ...interface{}) error {
 	}
 }
 
+func (c *Client) run() {
+	backoff := initialBackoff
+
+	for {
+		if c.closed.Load() {
+			return
+		}
+
+		if err := c.connectOnce(); err != nil {
+			log.Printf("socketio: connect failed: %v", err)
+
+			if !c.waitBackoff(&backoff) {
+				return
+			}
+
+			continue
+		}
+
+		backoff = initialBackoff
+
+		sessionEnd := make(chan struct{})
+		var sessionErr error
+		var sessionOnce sync.Once
+
+		endSession := func(err error) {
+			sessionOnce.Do(func() {
+				sessionErr = err
+				close(sessionEnd)
+			})
+		}
+
+		go c.readLoop(endSession)
+		go c.writeLoop(endSession)
+
+		<-sessionEnd
+		err := sessionErr
+		c.closeTransport()
+
+		if c.closed.Load() {
+			return
+		}
+
+		if fn := c.onDisconnect; fn != nil {
+			if err == nil {
+				err = errTransportLost
+			}
+
+			go fn(err)
+		}
+
+		if !c.waitBackoff(&backoff) {
+			return
+		}
+	}
+}
+
+func (c *Client) waitBackoff(backoff *time.Duration) bool {
+	timer := time.NewTimer(*backoff)
+	defer timer.Stop()
+
+	select {
+	case <-c.quitChan:
+		return false
+	case <-timer.C:
+	}
+
+	*backoff *= 2
+	if *backoff > maxReconnectBackoff {
+		*backoff = maxReconnectBackoff
+	}
+
+	return true
+}
+
 func (c *Client) connectOnce() error {
+	c.closeTransport()
+
 	dialer := engineio.Dialer{
 		Transports: []transport.Transport{websocket.Default},
 	}
@@ -167,29 +244,43 @@ func (c *Client) connectOnce() error {
 	return c.encoder.Encode(header)
 }
 
-func (c *Client) readLoop() {
+func (c *Client) closeTransport() error {
+	c.setConnected(false)
+
+	if c.engineConn == nil {
+		return nil
+	}
+
+	err := c.engineConn.Close()
+	c.engineConn = nil
+	c.encoder = nil
+	c.decoder = nil
+
+	return err
+}
+
+func (c *Client) readLoop(endSession func(error)) {
+	var err error
+
 	defer func() {
-		c.setConnected(false)
-		_ = c.Close()
+		endSession(err)
 	}()
 
 	for {
+		if c.closed.Load() {
+			return
+		}
+
 		var header parser.Header
 		var event string
 
-		if err := c.decoder.DecodeHeader(&header, &event); err != nil {
-			if c.onDisconnect != nil {
-				c.onDisconnect(err)
-			}
-
+		if err = c.decoder.DecodeHeader(&header, &event); err != nil {
 			return
 		}
 
 		if !c.validateNamespace(header.Namespace) {
 			continue
 		}
-
-		var err error
 
 		switch header.Type {
 		case parser.Ack:
@@ -203,10 +294,8 @@ func (c *Client) readLoop() {
 		}
 
 		if err != nil {
-			log.Printf("socketio: read error: %v", err)
-
-			if c.onDisconnect != nil {
-				c.onDisconnect(err)
+			if !errors.Is(err, errServerDisconnect) {
+				log.Printf("socketio: read error: %v", err)
 			}
 
 			return
@@ -214,7 +303,7 @@ func (c *Client) readLoop() {
 	}
 }
 
-func (c *Client) writeLoop() {
+func (c *Client) writeLoop(endSession func(error)) {
 	for {
 		select {
 		case <-c.quitChan:
@@ -229,10 +318,7 @@ func (c *Client) writeLoop() {
 
 			if err != nil {
 				log.Printf("socketio: write error: %v", err)
-
-				if c.onDisconnect != nil {
-					c.onDisconnect(err)
-				}
+				endSession(err)
 
 				return
 			}
@@ -267,26 +353,12 @@ func (c *Client) handleConnect() error {
 }
 
 func (c *Client) handleDisconnect() error {
-	reason := ""
-
-	args, err := c.decoder.DecodeArgs([]reflect.Type{reflect.TypeOf("")})
+	_, err := c.decoder.DecodeArgs([]reflect.Type{reflect.TypeOf("")})
 	if err != nil {
 		return err
 	}
 
-	if len(args) > 0 {
-		reason, _ = args[0].Interface().(string)
-	}
-
 	c.setConnected(false)
-
-	if c.onDisconnect != nil {
-		if reason != "" {
-			c.onDisconnect(errDisconnectReason(reason))
-		} else {
-			c.onDisconnect(errServerDisconnect)
-		}
-	}
 
 	return errServerDisconnect
 }
@@ -372,7 +444,10 @@ func (e disconnectError) Error() string {
 	return "socketio: disconnected: " + string(e)
 }
 
-var errServerDisconnect = errors.New("socketio: server disconnect")
+var (
+	errServerDisconnect = errors.New("socketio: server disconnect")
+	errTransportLost    = errors.New("socketio: transport connection lost")
+)
 
 func errDisconnectReason(reason string) error {
 	return disconnectError(reason)
