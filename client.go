@@ -185,7 +185,7 @@ func (c *Client) run() {
 
 		<-sessionEnd
 		err := sessionErr
-		c.closeTransport()
+		_ = c.closeTransport()
 
 		if c.closed.Load() {
 			return
@@ -224,7 +224,7 @@ func (c *Client) waitBackoff(backoff *time.Duration) bool {
 }
 
 func (c *Client) connectOnce() error {
-	c.closeTransport()
+	_ = c.closeTransport()
 
 	dialer := engineio.Dialer{
 		Transports: []transport.Transport{websocket.Default},
@@ -438,17 +438,7 @@ const (
 	rootNamespace      = ""
 )
 
-type disconnectError string
-
-func (e disconnectError) Error() string {
-	return "socketio: disconnected: " + string(e)
-}
-
 var (
 	errServerDisconnect = errors.New("socketio: server disconnect")
 	errTransportLost    = errors.New("socketio: transport connection lost")
 )
-
-func errDisconnectReason(reason string) error {
-	return disconnectError(reason)
-}
