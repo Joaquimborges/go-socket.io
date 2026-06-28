@@ -185,7 +185,9 @@ func (c *Client) run() {
 
 		<-sessionEnd
 		err := sessionErr
-		_ = c.closeTransport()
+		if closeErr := c.closeTransport(); closeErr != nil && err == nil {
+			err = closeErr
+		}
 
 		if c.closed.Load() {
 			return
