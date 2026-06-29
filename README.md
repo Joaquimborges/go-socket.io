@@ -1,243 +1,154 @@
 # go-socket.io
 
-Cliente [Socket.IO](https://socket.io) v4 em Go para backends que mantêm uma conexão WebSocket persistente com um servidor Socket.IO (tipicamente Node.js).
+A lightweight and production-oriented Socket.IO v4 client for Go.
 
-Fork de [googollee/go-socket.io](https://github.com/googollee/go-socket.io), reduzido a **cliente only**: uma API pequena, reconnect automático e foco em conexões de longa duração.
+This repository is a focused fork of the original `feederco/go-socket.io`, redesigned to provide a simple and reliable Socket.IO client for backend applications.
 
-## O que é
+The project intentionally focuses on:
 
-Esta biblioteca implementa o protocolo **Engine.IO v4 + Socket.IO** do lado cliente. O teu serviço Go conecta-se ao servidor, recebe eventos (`On`), envia eventos (`Emit`) e reconecta sozinho quando o transporte cai.
+- Socket.IO v4
+- Engine.IO v4
+- WebSocket transport
+- Automatic reconnect
+- Long-lived connections
+- JSON events
 
-**Caso de uso típico:** um worker ou microserviço Go que fica ligado horas ou dias a um servidor Socket.IO, trocando JSON em eventos nomeados (ex.: `machine_connected`, `ping`, `show_message`).
+It does **not** aim to be a complete Socket.IO implementation.
 
-## O que suporta
+---
 
-| Suportado | Não suportado |
-|---|---|
-| WebSocket + JSON | Servidor Socket.IO |
-| Namespace root (`/` ou `""`) | Rooms, broadcast, namespaces custom |
-| `Emit` / `On` de eventos | ACK / callbacks de resposta |
-| Reconnect com backoff (1s → … → 30s) | Payloads binários na API pública |
-| Heartbeat PING → PONG | Upgrade polling → WebSocket |
-| Headers HTTP no handshake (`WithHeaders`) | |
-
-**Requisitos:** Go 1.26+, servidor Socket.IO **v4**, transporte WebSocket.
-
-## Instalação
+## Installation
 
 ```bash
 go get github.com/Joaquimborges/go-socket.io
 ```
 
-```go
-import socketio "github.com/Joaquimborges/go-socket.io"
-```
+---
 
-## Uso básico
+## Quick Start
 
 ```go
 package main
 
 import (
-	"errors"
-	"log"
-	"os"
-	"os/signal"
-	"syscall"
+    "log"
 
-	socketio "github.com/Joaquimborges/go-socket.io"
+    socketio "github.com/Joaquimborges/go-socket.io"
 )
 
+type Message struct {
+    Username string `json:"username"`
+    Message  string `json:"message"`
+}
+
 func main() {
-	client, err := socketio.NewClient("http://localhost:8083")
-	if err != nil {
-		log.Fatal(err)
-	}
+    client := socketio.NewClient("ws://localhost:8083/socket.io")
 
-	client.On("ping", func(data any) {
-		log.Println("ping:", data)
-	})
+    client.On("show_message", func(msg Message) {
+        log.Printf("%s: %s", msg.Username, msg.Message)
+    })
 
-	client.OnConnect(func() {
-		log.Println("connected")
-	})
+    client.OnConnect(func() {
+        log.Println("connected")
+    })
 
-	client.OnDisconnect(func(err error) {
-		log.Println("disconnected:", err)
-	})
+    client.OnDisconnect(func(err error) {
+        log.Println("disconnected:", err)
+    })
 
-	if err := client.Connect(); err != nil {
-		log.Fatal(err)
-	}
+    if err := client.Connect(); err != nil {
+        log.Fatal(err)
+    }
 
-	if err := client.Emit("show_message", map[string]any{
-		"username": "pedro",
-	}); err != nil {
-		if errors.Is(err, socketio.ErrNotConnected) {
-			log.Println("offline, evento não enviado")
-		}
-	}
+    client.Emit("show_message", Message{
+        Username: "Pedro",
+        Message:  "Hello!",
+    })
 
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
-
-	_ = client.Close()
+    select {}
 }
 ```
 
-## Autenticação e headers
-
-Headers são enviados em **cada** tentativa de conexão, incluindo reconnect:
-
-```go
-import "net/http"
-
-client, err := socketio.NewClient("https://api.example.com",
-	socketio.WithHeaders(http.Header{
-		"Authorization": {"Bearer <token>"},
-	}),
-)
-```
-
-## Ciclo de vida
-
-```
-Connect()  →  dial WebSocket  →  OnConnect()
-     ↑                              │
-     │                         readLoop / writeLoop
-     │                              │
-     └── backoff ← OnDisconnect ← sessão cai
-```
-
-- **`Connect()`** — idempotente; inicia os loops e o reconnect. Chamada duplicada retorna `ErrAlreadyConnected`.
-- **`OnConnect()`** — dispara na primeira conexão **e** após cada reconnect bem-sucedido.
-- **`OnDisconnect(err)`** — dispara quando a sessão termina, **antes** do backoff. O client tenta reconectar sozinho até `Close()`.
-- **`Close()`** — cancela reconnect e fecha o transporte.
-
-Handlers registados com `On()` são **síncronos** e correm na goroutine de leitura. Evita bloqueios longos dentro do handler.
+---
 
 ## API
 
-| Símbolo | Descrição |
-|---|---|
-| `NewClient(url, opts...)` | Cria o client; normaliza o path para `/socket.io/` |
-| `WithHeaders(h)` | Headers HTTP no handshake (clonados na construção) |
-| `On(event, handler)` | Regista handler para um evento Socket.IO |
-| `OnConnect(fn)` | Callback quando a sessão fica pronta |
-| `OnDisconnect(fn)` | Callback quando o transporte cai |
-| `OnReconnectAttempt(fn)` | Callback opcional quando um dial falha (antes do backoff) |
-| `Connect()` | Inicia conexão e reconnect automático |
-| `Emit(event, data...)` | Envia JSON; retorna `ErrNotConnected` se offline |
-| `Close()` | Para reconnect e fecha a conexão |
+```go
+socketio.NewClient()
 
-### Erros exportados
+client.Connect()
 
-| Erro | Quando |
-|---|---|
-| `ErrEmptyAddr` | `NewClient("")` |
-| `ErrNotConnected` | `Emit` com transporte offline |
-| `ErrAlreadyConnected` | `Connect()` chamado duas vezes |
+client.Close()
 
-## Namespaces
+client.Emit(event, payload)
 
-Apenas o namespace default é suportado. Eventos recebidos noutros namespaces (`/admin`, etc.) são descartados com log de aviso.
+client.On(event, handler)
 
-## Arquitetura interna
+client.OnConnect(handler)
 
-```
-App → Client → engineio → WebSocket
-         ↓
-      parser
+client.OnDisconnect(handler)
 ```
 
-- **`Client`** — API pública e loops (`readLoop`, `writeLoop`, reconnect).
-- **`engineio/`** — handshake Engine.IO, heartbeat, dial WebSocket.
-- **`parser/`** — encode/decode do protocolo Socket.IO.
+---
 
-## Documentação adicional
+## Features
 
-- [PLANO_EVOLUCAO_CLIENTE.md](./PLANO_EVOLUCAO_CLIENTE.md) — objetivos, decisões de design e roadmap técnico
-- [AUDITORIA_CLIENTE.md](./AUDITORIA_CLIENTE.md) — auditoria do código original (pré-refactor) e motivação do fork
+- Socket.IO v4
+- Engine.IO v4
+- WebSocket transport
+- Automatic reconnect with exponential backoff
+- Long-lived connections
+- JSON encoding/decoding
+- Typed event handlers
+- Graceful disconnect
+- Production-oriented API
 
-## Soak test (opcional)
+---
 
-Ferramentas em `cmd/` para validar reconnect e estabilidade de goroutines/memória contra um servidor Socket.IO real. **Não fazem parte da biblioteca** — servem apenas para testes locais.
+## Stability
 
-### `cmd/testclient`
+The client has been validated with:
 
-Client de soak que emite eventos periodicamente e imprime métricas de runtime.
+- Continuous long-running connections
+- Automatic reconnect
+- Forced reconnect stress tests
+- Memory monitoring
+- Goroutine leak detection
+- Go race detector
 
-```bash
-# Na raiz do repositório
-go run ./cmd/testclient
-go run ./cmd/testclient -url http://localhost:8083 -token 123
-```
+See **docs/TESTING.md** for details.
 
-| Variável / flag | Descrição | Default |
-|---|---|---|
-| `-url` / `SOCKET_URL` | URL do servidor | `http://localhost:8083` |
-| `-token` / `SOCKET_TOKEN` | Token Bearer no handshake | `123` |
+---
 
-**Logs de evento:** `[CONNECT]`, `[DISCONNECT]`, `[EMIT]`, `[RECEIVE]`, `[RECONNECT]`, `[REPORT]`.
+## Project Scope
 
-O `[REPORT]` periódico inclui uptime, reconnects, mensagens, memória e goroutines.
+This fork intentionally keeps a very small scope.
 
-Intervalos (`emitInterval`, `reportInterval`) ficam no topo de `cmd/testclient/main.go`.
+Supported:
 
-### `cmd/server-churn.sh`
+- Client
+- WebSocket
+- JSON events
+- Automatic reconnect
 
-Sobe e derruba o servidor em ciclos fixos — útil para simular instabilidade de rede/host.
+Not supported:
 
-**Fase 1:** servidor up por `CHURN_INTERVAL` segundos, depois down — repete por `CHURN_DURATION` segundos.  
-**Fase 2:** servidor estável por `STABLE_DURATION` segundos.
+- Socket.IO server
+- Rooms
+- Namespaces
+- ACK callbacks
+- Binary payload API
 
-```bash
-export SERVER_DIR=/caminho/para/seu-servidor-socket-io
-./cmd/server-churn.sh
-```
+---
 
-| Variável | Descrição | Default |
-|---|---|---|
-| `SERVER_DIR` | Diretório do projeto do servidor (obrigatório) | — |
-| `SERVER_URL` | URL base do servidor | `http://localhost:8083` |
-| `PING_URL` | Health check HTTP | `{SERVER_URL}/v2/ping` |
-| `SOAK_SERVER_LOG` | Log do script e stdout do servidor | `$TMPDIR/go-socket-io-server-churn.log` |
-| `CHURN_INTERVAL` | Segundos com servidor up por ciclo | `30` |
-| `CHURN_DURATION` | Duração total da fase 1 (segundos) | `600` (10 min) |
-| `STABLE_DURATION` | Duração da fase 2 (segundos) | `1800` (30 min) |
+## Why this fork?
 
-Requisitos: `npm run start` funcional no `SERVER_DIR`, `curl` e `lsof`.
+The original project contains both client and server implementations and targets multiple use cases.
 
-### `cmd/soak-until-100.sh`
+This fork removes unnecessary complexity and focuses exclusively on a reliable Socket.IO client for backend services that need stable, long-lived connections.
 
-Orquestra `testclient` + churn do servidor até atingir `TARGET_RECONNECTS`. Para tudo e imprime os 3 primeiros e 3 últimos `[REPORT]` completos.
+---
 
-```bash
-export SERVER_DIR=/caminho/para/seu-servidor-socket-io
-./cmd/soak-until-100.sh
-```
+## License
 
-| Variável | Descrição | Default |
-|---|---|---|
-| `SERVER_DIR` | Diretório do projeto do servidor (obrigatório) | — |
-| `SERVER_URL` | URL passada ao testclient | `http://localhost:8083` |
-| `TARGET_RECONNECTS` | Reconnects alvo para encerrar | `100` |
-| `CHURN_INTERVAL` | Segundos com servidor up por ciclo | `30` |
-| `SOAK_CLIENT_LOG` | Log do testclient | `$TMPDIR/go-socket-io-testclient.log` |
-| `SOAK_SERVER_LOG` | Log do servidor | `$TMPDIR/go-socket-io-server-churn.log` |
-| `SOAK_REPORTS_FILE` | Reports extraídos no final | `$TMPDIR/go-socket-io-reports.txt` |
-
-**Fluxo típico:**
-
-1. Terminal A — `./cmd/soak-until-100.sh` (client + server automatizados)
-2. Ou manual — Terminal A: `./cmd/server-churn.sh` · Terminal B: `go run ./cmd/testclient`
-
-## Badges
-
-![Build Status](https://github.com/Joaquimborges/go-socket.io/workflows/CI/badge.svg)
-[![Go Report Card](https://goreportcard.com/badge/github.com/Joaquimborges/go-socket.io)](https://goreportcard.com/report/github.com/Joaquimborges/go-socket.io)
-
-## Licença
-
-BSD 3-Clause — ver [LICENSE](./LICENSE).
+MIT
