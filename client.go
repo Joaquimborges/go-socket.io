@@ -47,8 +47,9 @@ type Client struct {
 	events     map[string]*eventHandler
 	eventsLock sync.RWMutex
 
-	onConnect    func()
-	onDisconnect func(err error)
+	onConnect          func()
+	onDisconnect       func(err error)
+	onReconnectAttempt func(attempt int, backoff time.Duration, err error)
 }
 
 // NewClient creates a client for the given Socket.IO server URL.
@@ -134,6 +135,11 @@ func (c *Client) OnDisconnect(f func(err error)) {
 	c.onDisconnect = f
 }
 
+// OnReconnectAttempt registers a callback invoked when a dial attempt fails before backoff.
+func (c *Client) OnReconnectAttempt(f func(attempt int, backoff time.Duration, err error)) {
+	c.onReconnectAttempt = f
+}
+
 // Emit sends an event with JSON-encoded arguments.
 func (c *Client) Emit(event string, args ...interface{}) error {
 	if !c.isConnected() {
@@ -159,6 +165,7 @@ func (c *Client) Emit(event string, args ...interface{}) error {
 
 func (c *Client) run() {
 	backoff := initialBackoff
+	reconnectAttempt := 0
 
 	for {
 		if c.closed.Load() {
@@ -166,7 +173,10 @@ func (c *Client) run() {
 		}
 
 		if err := c.connectOnce(); err != nil {
-			log.Printf("socketio: connect failed: %v", err)
+			reconnectAttempt++
+			if fn := c.onReconnectAttempt; fn != nil {
+				fn(reconnectAttempt, backoff, err)
+			}
 
 			if !c.waitBackoff(&backoff) {
 				return
@@ -175,6 +185,7 @@ func (c *Client) run() {
 			continue
 		}
 
+		reconnectAttempt = 0
 		backoff = initialBackoff
 
 		sessionEnd := make(chan struct{})
@@ -189,7 +200,7 @@ func (c *Client) run() {
 		}
 
 		go c.readLoop(endSession)
-		go c.writeLoop(endSession)
+		go c.writeLoop(endSession, sessionEnd)
 
 		<-sessionEnd
 		err := sessionErr
@@ -206,7 +217,9 @@ func (c *Client) run() {
 				err = errTransportLost
 			}
 
-			go fn(err)
+			go func(disconnectErr error) {
+				fn(disconnectErr)
+			}(err)
 		}
 
 		if !c.waitBackoff(&backoff) {
@@ -313,10 +326,12 @@ func (c *Client) readLoop(endSession func(error)) {
 	}
 }
 
-func (c *Client) writeLoop(endSession func(error)) {
+func (c *Client) writeLoop(endSession func(error), sessionEnd <-chan struct{}) {
 	for {
 		select {
 		case <-c.quitChan:
+			return
+		case <-sessionEnd:
 			return
 		case pkg := <-c.writeChan:
 			var err error

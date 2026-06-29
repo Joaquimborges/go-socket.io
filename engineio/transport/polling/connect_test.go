@@ -29,6 +29,8 @@ func TestDialOpen(t *testing.T) {
 		Upgrades:     []string{"polling"},
 	}
 
+	postReceived := make(chan struct{}, 1)
+
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		query := r.URL.Query()
@@ -59,6 +61,7 @@ func TestDialOpen(t *testing.T) {
 			must.NoError(err)
 
 			should.Equal("6:4hello", string(b))
+			postReceived <- struct{}{}
 		}
 	}
 
@@ -95,4 +98,10 @@ func TestDialOpen(t *testing.T) {
 	_, err = w.Write([]byte("hello"))
 	must.NoError(err)
 	should.Nil(w.Close())
+
+	select {
+	case <-postReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for POST request")
+	}
 }

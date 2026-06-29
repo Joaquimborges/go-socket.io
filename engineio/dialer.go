@@ -48,8 +48,6 @@ func (d *Dialer) Dial(urlStr string, requestHeader http.Header) (Conn, error) {
 
 		conn, err = t.Dial(u, requestHeader)
 		if err != nil {
-			logger.Error("transport dial:", err)
-
 			continue
 		}
 
