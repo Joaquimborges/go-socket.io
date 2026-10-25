@@ -108,7 +108,7 @@ func (e *Encoder) writePacket(w io.WriteCloser, h Header, args []interface{}) ([
 		if _, err := bw.Write([]byte(h.Namespace)); err != nil {
 			return nil, err
 		}
-		if h.ID != 0 || args != nil {
+		if h.NeedAck || len(args) > 0 {
 			if err := bw.WriteByte(','); err != nil {
 				return nil, err
 			}

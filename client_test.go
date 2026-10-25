@@ -59,3 +59,26 @@ func TestNewClientWithHeaders(t *testing.T) {
 	headers.Set("Authorization", "mutated")
 	require.Equal(t, "Bearer token", client.headers.Get("Authorization"))
 }
+
+func TestNewConnectError(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		message string
+		data    string
+	}{
+		{"object", `{"message":"invalid service","data":{"code":1}}`, "invalid service", `{"code":1}`},
+		{"object without data", `{"message":"invalid service"}`, "invalid service", ""},
+		{"string", `"invalid service"`, "invalid service", ""},
+		{"not json", `invalid service`, "invalid service", ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := newConnectError([]byte(test.raw))
+			require.Equal(t, test.message, err.Message)
+			require.Equal(t, test.data, string(err.Data))
+			require.Equal(t, "socketio: connect error: "+test.message, err.Error())
+		})
+	}
+}
