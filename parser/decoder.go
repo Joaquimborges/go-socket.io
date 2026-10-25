@@ -159,6 +159,15 @@ func (d *Decoder) DecodeArgs(types []reflect.Type) ([]reflect.Value, error) {
 	return ret, nil
 }
 
+// DecodeRaw returns the rest of the current text frame undecoded, for payloads that are not an argument array,
+// such as the object a CONNECT_ERROR carries.
+func (d *Decoder) DecodeRaw() ([]byte, error) {
+	b, err := io.ReadAll(d.packetReader)
+	_ = d.DiscardLast()
+
+	return bytes.TrimSpace(b), err
+}
+
 func (d *Decoder) readUint64FromText(r byteReader) (uint64, bool, error) {
 	var ret uint64
 	var hasRead bool

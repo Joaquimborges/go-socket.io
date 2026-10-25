@@ -2,7 +2,7 @@
 
 > **Note (June 2026):** this document describes the **original** state of the fork (based on googollee/go-socket.io with a minimal client coupled to the server), **before** the refactor described in [CLIENT_EVOLUTION_PLAN.md](./CLIENT_EVOLUTION_PLAN.md). Kept as historical reference and record of decisions.
 >
-> **Current library state:** client-only, Engine.IO v4, WebSocket, automatic reconnect, `WithHeaders`. See [README.md](../README.md) for usage and API.
+> **Current library state (v1.1.0):** client-only, Engine.IO v4, WebSocket, automatic reconnect with configurable backoff, `WithHeaders`, `Reconnect`, server refusals reported as `*ConnectError`. See [README.md](../README.md) for usage and API.
 
 **Repository:** `github.com/Joaquimborges/go-socket.io` (fork of feederco/go-socket.io)  
 **Audit scope:** **pre-refactor** code, used as a client against **Socket.IO v4** server (Node.js)  
@@ -15,16 +15,17 @@
 
 | Original issue (audit) | Resolution |
 |---|---|
-| No reconnection | Reconnect with backoff 1s → 30s |
+| No reconnection | Reconnect with backoff (default 1s → 30s, configurable with jitter); `Reconnect()` on demand |
 | Engine.IO v3 (`EIO=3`) | Engine.IO v4 (`EIO=4`) |
 | PING ignored | PING → PONG in `engineio/client.go` |
 | Duplicate `Connect()` leaked goroutines | Idempotent `Connect()` + `ErrAlreadyConnected` |
 | Default transport polling | WebSocket-only dial |
-| Race in `nextID()` / ACK | ACK removed from API; internal response to `NeedAck` |
-| Zero client tests | Basic unit tests; integration pending |
-| Callbacks on read goroutine | Kept (documented); handlers must be fast |
+| Race in `nextID()` / ACK | ACK removed from API; empty receipt sent on the session the event arrived on |
+| Zero client tests | Unit tests plus integration tests against an in-process server |
+| Callbacks on read goroutine | Kept (documented in the README); handlers must be fast |
 
-**Pending:** integration tests against a real Socket.IO v4 server and long-duration soak.
+**Validated:** soak against the relay (`machine-socket-server-ts`) with 100 restarts — see [TESTING.md](./TESTING.md).
+**Pending:** integration tests against a Node server in CI.
 
 ---
 

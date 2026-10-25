@@ -1,0 +1,190 @@
+name: Pipeline
+
+# One run per push to a pull request into master: tests, then the tag, and for a release the GitHub release. Each
+# stage waits for the one before and is skipped if it failed, so no tag is ever pushed from code that did not pass
+# the tests.
+#
+#   PR from any branch        ->  v0.0.N-{branch}, N one past the last tag of that branch (v0.0.1 on the first push)
+#   PR from release/X.Y.Z     ->  vX.Y.Z-rc.N, N one past the last candidate, published as the Latest GitHub release
+#   release/X.Y.Z merged      ->  vX.Y.Z on the merge commit, published as the Latest GitHub release
+#
+# Unlike the services, no tag ever moves. This repository is a public Go module: the module proxy and the checksum
+# database keep the first content they see for a version, so a moved tag would fail with a checksum mismatch for
+# everyone who resolves it afterwards. Each candidate is a new tag instead, and the final version is its own tag
+# because `go get @latest` skips pre-releases once any release exists.
+on:
+  pull_request:
+    branches:
+      - master
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: write
+
+# One run at a time per branch, and none cancelled: two pushes in a row must get two numbers, in order, and the
+# merge must not overtake the last candidate.
+concurrency:
+  group: pipeline-${{ github.head_ref }}
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    if: github.event.action != 'closed'
+    uses: ./.github/workflows/tests.yml
+
+  tag:
+    needs: tests
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      release: ${{ steps.tag.outputs.release }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Compute the tag
+        id: tag
+        env:
+          HEAD: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force --quiet
+
+          # A release must name a version that is new and above every version already released.
+          check_new_version() {
+            local version="v$1" highest
+            if git rev-parse -q --verify "refs/tags/$version" >/dev/null; then
+              echo "::error::$version was already released"
+              exit 1
+            fi
+            highest=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+            if [ -n "$highest" ] && [ "$(printf '%s\n%s\n' "$highest" "$version" | sort -V | tail -1)" != "$version" ]; then
+              echo "::error::$version must be above the latest release, $highest"
+              exit 1
+            fi
+          }
+
+          if [[ "$HEAD" =~ ^release/([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            VERSION=${BASH_REMATCH[1]}
+            check_new_version "$VERSION"
+
+            LAST=0
+            while read -r existing; do
+              [ -z "$existing" ] && continue
+              number=${existing#"v${VERSION}-rc."}
+              if [[ "$number" =~ ^[0-9]+$ ]] && [ "$number" -gt "$LAST" ]; then
+                LAST=$number
+              fi
+            done < <(git tag -l "v${VERSION}-rc.*")
+
+            TAG="v${VERSION}-rc.$((LAST + 1))"
+            RELEASE=true
+          elif [[ "$HEAD" == release/* ]]; then
+            echo "::error::A release branch must be named release/X.Y.Z (this one is $HEAD)"
+            exit 1
+          else
+            # The last segment of the branch as one semver pre-release identifier: feat/client-hardening gives
+            # client-hardening. An all-digit identifier may not start with 0 in semver, hence the prefix.
+            SUFFIX=$(printf '%s' "${HEAD##*/}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//' | cut -c1-100)
+            if [ -z "$SUFFIX" ]; then
+              echo "::error::Could not build a tag suffix from the branch $HEAD"
+              exit 1
+            fi
+            if [[ "$SUFFIX" =~ ^[0-9]+$ ]]; then
+              SUFFIX="branch-$SUFFIX"
+            fi
+
+            LAST=0
+            while read -r existing; do
+              [ -z "$existing" ] && continue
+              number=${existing#v0.0.}
+              number=${number%-"$SUFFIX"}
+              if [[ "$number" =~ ^[0-9]+$ ]] && [ "$number" -gt "$LAST" ]; then
+                LAST=$number
+              fi
+            done < <(git tag -l "v0.0.*-${SUFFIX}")
+
+            TAG="v0.0.$((LAST + 1))-${SUFFIX}"
+            RELEASE=false
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "release=$RELEASE" >> "$GITHUB_OUTPUT"
+          echo "Tag: \`$TAG\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push the tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Never forced: an existing tag means a number was computed twice, and moving it would break the module.
+          git tag "$TAG" "$SHA"
+          git push origin "refs/tags/$TAG"
+
+  release:
+    needs: tag
+    if: needs.tag.outputs.release == 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+    secrets: inherit
+
+  final-tag:
+    if: github.event.action == 'closed' && github.event.pull_request.merged && startsWith(github.head_ref, 'release/')
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Compute the version
+        id: tag
+        env:
+          HEAD: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force --quiet
+
+          if [[ ! "$HEAD" =~ ^release/([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::A release branch must be named release/X.Y.Z (this one is $HEAD)"
+            exit 1
+          fi
+          TAG="v${BASH_REMATCH[1]}"
+
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::$TAG was already released"
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Tag: \`$TAG\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push the tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG" "$SHA"
+          git push origin "refs/tags/$TAG"
+
+  final-release:
+    needs: final-tag
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.final-tag.outputs.tag }}
+    secrets: inherit

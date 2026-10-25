@@ -83,3 +83,19 @@ func TestDecoder(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeRaw(t *testing.T) {
+	r := fakeReader{data: [][]byte{[]byte("4/admin,{\"message\":\"invalid service\"}\n")}}
+	decoder := NewDecoder(&r)
+
+	var header Header
+	var event string
+
+	require.NoError(t, decoder.DecodeHeader(&header, &event))
+	require.Equal(t, Header{Type: Error, Namespace: "/admin"}, header)
+
+	raw, err := decoder.DecodeRaw()
+	require.NoError(t, err)
+	require.Equal(t, `{"message":"invalid service"}`, string(raw))
+	require.Equal(t, 1, r.index, "the frame is released")
+}

@@ -3,6 +3,7 @@ package socketio
 import (
 	"errors"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"path"
@@ -19,8 +20,12 @@ import (
 )
 
 const (
-	maxReconnectBackoff = 30 * time.Second
-	initialBackoff      = time.Second
+	defaultMaxBackoff     = 30 * time.Second
+	defaultInitialBackoff = time.Second
+
+	// connectTimeout bounds the wait for the server to accept the Socket.IO connection, as the JS client's
+	// default timeout does.
+	connectTimeout = 20 * time.Second
 )
 
 // Client is a Socket.IO client for the default namespace.
@@ -28,11 +33,13 @@ type Client struct {
 	url     string
 	headers http.Header
 
-	engineConn engineio.Conn
-	encoder    *parser.Encoder
-	decoder    *parser.Decoder
+	initialBackoff time.Duration
+	maxBackoff     time.Duration
+	jitter         float64
 
-	writeChan chan parser.Payload
+	// optErr is the first invalid option, reported by NewClient.
+	optErr error
+
 	quitChan  chan struct{}
 	closeOnce sync.Once
 
@@ -41,8 +48,11 @@ type Client struct {
 
 	closed atomic.Bool
 
-	mu        sync.RWMutex
-	connected bool
+	// mu guards the transport being dialed or in use and the session accepted on it. current is nil until the
+	// server accepts the connection and again once it ends, which is what Emit reads as "not connected".
+	mu         sync.Mutex
+	engineConn engineio.Conn
+	current    *session
 
 	events     map[string]*eventHandler
 	eventsLock sync.RWMutex
@@ -50,6 +60,36 @@ type Client struct {
 	onConnect          func()
 	onDisconnect       func(err error)
 	onReconnectAttempt func(attempt int, backoff time.Duration, err error)
+	onEventError       func(event string, err error)
+}
+
+// session is one accepted Socket.IO connection. Everything its loops read and write travels with it, so a loop
+// left over from an earlier connection can never read from or write to the next one.
+type session struct {
+	encoder   *parser.Encoder
+	decoder   *parser.Decoder
+	writeChan chan parser.Payload
+
+	done    chan struct{}
+	endOnce sync.Once
+	err     error
+}
+
+func newSession(encoder *parser.Encoder, decoder *parser.Decoder) *session {
+	return &session{
+		encoder:   encoder,
+		decoder:   decoder,
+		writeChan: make(chan parser.Payload),
+		done:      make(chan struct{}),
+	}
+}
+
+// end records the first reason the session ended and releases everything waiting on it.
+func (s *session) end(err error) {
+	s.endOnce.Do(func() {
+		s.err = err
+		close(s.done)
+	})
 }
 
 // NewClient creates a client for the given Socket.IO server URL.
@@ -71,12 +111,18 @@ func NewClient(addr string, opts ...ClientOption) (*Client, error) {
 	}
 
 	client := &Client{
-		url:    u.String(),
-		events: make(map[string]*eventHandler),
+		url:            u.String(),
+		events:         make(map[string]*eventHandler),
+		initialBackoff: defaultInitialBackoff,
+		maxBackoff:     defaultMaxBackoff,
 	}
 
 	for _, opt := range opts {
 		opt(client)
+	}
+
+	if client.optErr != nil {
+		return nil, client.optErr
 	}
 
 	return client, nil
@@ -91,7 +137,6 @@ func (c *Client) Connect() error {
 		return ErrAlreadyConnected
 	}
 
-	c.writeChan = make(chan parser.Payload)
 	c.quitChan = make(chan struct{})
 	c.loopsStarted = true
 
@@ -135,18 +180,37 @@ func (c *Client) OnDisconnect(f func(err error)) {
 	c.onDisconnect = f
 }
 
-// OnReconnectAttempt registers a callback invoked when a dial attempt fails before backoff.
+// OnReconnectAttempt registers a callback invoked when a connection attempt fails, with the wait before the
+// next one. A server that refuses the connection reports a *ConnectError here.
 func (c *Client) OnReconnectAttempt(f func(attempt int, backoff time.Duration, err error)) {
 	c.onReconnectAttempt = f
 }
 
-// Emit sends an event with JSON-encoded arguments.
-func (c *Client) Emit(event string, args ...interface{}) error {
-	if !c.isConnected() {
+// Reconnect ends the current session and lets the client connect again after the initial backoff, as after a
+// dropped transport. OnDisconnect receives ErrReconnectRequested. It is meant for a liveness check of the
+// caller's own, such as an application heartbeat that went silent while the transport still looks open.
+//
+// Without an accepted session — before Connect, while waiting to retry, or after Close — it returns
+// ErrNotConnected and does nothing.
+func (c *Client) Reconnect() error {
+	s := c.currentSession()
+	if s == nil {
 		return ErrNotConnected
 	}
 
-	data := make([]interface{}, len(args)+1)
+	s.end(ErrReconnectRequested)
+
+	return nil
+}
+
+// Emit sends an event with JSON-encoded arguments.
+func (c *Client) Emit(event string, args ...any) error {
+	s := c.currentSession()
+	if s == nil {
+		return ErrNotConnected
+	}
+
+	data := make([]any, len(args)+1)
 	data[0] = event
 	copy(data[1:], args)
 
@@ -155,16 +219,23 @@ func (c *Client) Emit(event string, args ...interface{}) error {
 		Data:   data,
 	}
 
+	return c.send(s, pkg)
+}
+
+// send hands a packet to the session's write loop, and fails once that session or the client is gone.
+func (c *Client) send(s *session, pkg parser.Payload) error {
 	select {
-	case c.writeChan <- pkg:
+	case s.writeChan <- pkg:
 		return nil
+	case <-s.done:
+		return ErrNotConnected
 	case <-c.quitChan:
 		return ErrNotConnected
 	}
 }
 
 func (c *Client) run() {
-	backoff := initialBackoff
+	backoff := c.initialBackoff
 	reconnectAttempt := 0
 
 	for {
@@ -172,13 +243,19 @@ func (c *Client) run() {
 			return
 		}
 
-		if err := c.connectOnce(); err != nil {
-			reconnectAttempt++
-			if fn := c.onReconnectAttempt; fn != nil {
-				fn(reconnectAttempt, backoff, err)
+		s, err := c.connectOnce()
+		if err != nil {
+			if c.closed.Load() {
+				return
 			}
 
-			if !c.waitBackoff(&backoff) {
+			reconnectAttempt++
+			delay := nextDelay(backoff, c.jitter, rand.Float64())
+			if fn := c.onReconnectAttempt; fn != nil {
+				fn(reconnectAttempt, delay, err)
+			}
+
+			if !c.waitBackoff(&backoff, delay) {
 				return
 			}
 
@@ -186,24 +263,17 @@ func (c *Client) run() {
 		}
 
 		reconnectAttempt = 0
-		backoff = initialBackoff
+		backoff = c.initialBackoff
 
-		sessionEnd := make(chan struct{})
-		var sessionErr error
-		var sessionOnce sync.Once
-
-		endSession := func(err error) {
-			sessionOnce.Do(func() {
-				sessionErr = err
-				close(sessionEnd)
-			})
+		if fn := c.onConnect; fn != nil {
+			go fn()
 		}
 
-		go c.readLoop(endSession)
-		go c.writeLoop(endSession, sessionEnd)
+		go c.readLoop(s)
+		go c.writeLoop(s)
 
-		<-sessionEnd
-		err := sessionErr
+		<-s.done
+		err = s.err
 		if closeErr := c.closeTransport(); closeErr != nil && err == nil {
 			err = closeErr
 		}
@@ -222,14 +292,15 @@ func (c *Client) run() {
 			}(err)
 		}
 
-		if !c.waitBackoff(&backoff) {
+		if !c.waitBackoff(&backoff, nextDelay(backoff, c.jitter, rand.Float64())) {
 			return
 		}
 	}
 }
 
-func (c *Client) waitBackoff(backoff *time.Duration) bool {
-	timer := time.NewTimer(*backoff)
+// waitBackoff waits delay, then doubles backoff up to the maximum. It returns false when Close stops the wait.
+func (c *Client) waitBackoff(backoff *time.Duration, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
 	defer timer.Stop()
 
 	select {
@@ -239,57 +310,154 @@ func (c *Client) waitBackoff(backoff *time.Duration) bool {
 	}
 
 	*backoff *= 2
-	if *backoff > maxReconnectBackoff {
-		*backoff = maxReconnectBackoff
+	if *backoff > c.maxBackoff {
+		*backoff = c.maxBackoff
 	}
 
 	return true
 }
 
-func (c *Client) connectOnce() error {
-	_ = c.closeTransport()
+// nextDelay draws the wait for backoff from (backoff×(1−jitter), backoff], given r in [0, 1). With no jitter it is
+// backoff itself.
+func nextDelay(backoff time.Duration, jitter, r float64) time.Duration {
+	return backoff - time.Duration(float64(backoff)*jitter*r)
+}
 
+// connectOnce dials the transport and waits for the server to accept the Socket.IO connection. Only an accepted
+// connection counts as connected, so a refusal is a failed attempt and keeps the backoff growing.
+func (c *Client) connectOnce() (*session, error) {
 	dialer := engineio.Dialer{
 		Transports: []transport.Transport{websocket.Default},
 	}
 
 	engineConn, err := dialer.Dial(c.url, c.headers)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
+	// Close may run while the dial is in flight: either it sees this transport and closes it, or the check
+	// below does.
+	c.mu.Lock()
+	if c.closed.Load() {
+		c.mu.Unlock()
+		_ = engineConn.Close()
+
+		return nil, errClientClosed
+	}
 	c.engineConn = engineConn
-	c.encoder = parser.NewEncoder(engineConn)
-	c.decoder = parser.NewDecoder(engineConn)
+	c.mu.Unlock()
 
-	header := parser.Header{Type: parser.Connect}
+	s, err := handshake(engineConn)
+	if err != nil {
+		_ = c.closeTransport()
 
-	return c.encoder.Encode(header)
+		return nil, err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.engineConn != engineConn {
+		return nil, errClientClosed
+	}
+	c.current = s
+
+	return s, nil
+}
+
+// handshake sends CONNECT on the root namespace and reads until the server accepts or refuses it.
+func handshake(engineConn engineio.Conn) (*session, error) {
+	encoder := parser.NewEncoder(engineConn)
+	decoder := parser.NewDecoder(engineConn)
+
+	if err := encoder.Encode(parser.Header{Type: parser.Connect}); err != nil {
+		return nil, err
+	}
+
+	var timedOut atomic.Bool
+	timer := time.AfterFunc(connectTimeout, func() {
+		timedOut.Store(true)
+		_ = engineConn.Close()
+	})
+
+	for {
+		var header parser.Header
+		var event string
+
+		if err := decoder.DecodeHeader(&header, &event); err != nil {
+			timer.Stop()
+			if timedOut.Load() {
+				return nil, errConnectTimeout
+			}
+
+			return nil, err
+		}
+
+		if !validateNamespace(decoder, header.Namespace) {
+			continue
+		}
+
+		switch header.Type {
+		case parser.Connect:
+			err := decoder.DiscardLast()
+			if !timer.Stop() {
+				// The timeout fired as the reply arrived and has already closed the transport.
+				return nil, errConnectTimeout
+			}
+			if err != nil {
+				return nil, err
+			}
+
+			return newSession(encoder, decoder), nil
+
+		case parser.Error:
+			timer.Stop()
+			raw, err := decoder.DecodeRaw()
+			if err != nil {
+				return nil, err
+			}
+
+			return nil, newConnectError(raw)
+
+		default:
+			// Nothing else is meaningful before the server accepts the connection.
+			if err := decoder.DiscardLast(); err != nil {
+				timer.Stop()
+
+				return nil, err
+			}
+		}
+	}
 }
 
 func (c *Client) closeTransport() error {
-	c.setConnected(false)
+	c.mu.Lock()
+	engineConn := c.engineConn
+	c.engineConn = nil
+	c.current = nil
+	c.mu.Unlock()
 
-	if c.engineConn == nil {
+	if engineConn == nil {
 		return nil
 	}
 
-	err := c.engineConn.Close()
-	c.engineConn = nil
-	c.encoder = nil
-	c.decoder = nil
-
-	return err
+	return engineConn.Close()
 }
 
-func (c *Client) readLoop(endSession func(error)) {
+func (c *Client) readLoop(s *session) {
 	var err error
 
 	defer func() {
-		endSession(err)
+		s.end(err)
 	}()
 
 	for {
+		select {
+		case <-s.done:
+			return
+		default:
+		}
+
 		if c.closed.Load() {
 			return
 		}
@@ -297,27 +465,26 @@ func (c *Client) readLoop(endSession func(error)) {
 		var header parser.Header
 		var event string
 
-		if err = c.decoder.DecodeHeader(&header, &event); err != nil {
+		if err = s.decoder.DecodeHeader(&header, &event); err != nil {
 			return
 		}
 
-		if !c.validateNamespace(header.Namespace) {
+		if !validateNamespace(s.decoder, header.Namespace) {
 			continue
 		}
 
 		switch header.Type {
-		case parser.Ack:
-			err = c.decoder.DiscardLast()
-		case parser.Connect:
-			err = c.handleConnect()
 		case parser.Disconnect:
-			err = c.handleDisconnect()
+			err = c.handleDisconnect(s)
 		case parser.Event:
-			err = c.handleEvent(event, header)
+			err = c.handleEvent(s, event, header)
+		default:
+			// Server ACKs, a repeated CONNECT and errors on an accepted connection carry nothing to act on.
+			err = s.decoder.DiscardLast()
 		}
 
 		if err != nil {
-			if !errors.Is(err, errServerDisconnect) {
+			if !errors.Is(err, errServerDisconnect) && !errors.Is(err, ErrNotConnected) {
 				log.Printf("socketio: read error: %v", err)
 			}
 
@@ -326,24 +493,24 @@ func (c *Client) readLoop(endSession func(error)) {
 	}
 }
 
-func (c *Client) writeLoop(endSession func(error), sessionEnd <-chan struct{}) {
+func (c *Client) writeLoop(s *session) {
 	for {
 		select {
 		case <-c.quitChan:
 			return
-		case <-sessionEnd:
+		case <-s.done:
 			return
-		case pkg := <-c.writeChan:
+		case pkg := <-s.writeChan:
 			var err error
 			if len(pkg.Data) > 0 {
-				err = c.encoder.Encode(pkg.Header, pkg.Data)
+				err = s.encoder.Encode(pkg.Header, pkg.Data)
 			} else {
-				err = c.encoder.Encode(pkg.Header)
+				err = s.encoder.Encode(pkg.Header)
 			}
 
 			if err != nil {
 				log.Printf("socketio: write error: %v", err)
-				endSession(err)
+				s.end(err)
 
 				return
 			}
@@ -351,74 +518,65 @@ func (c *Client) writeLoop(endSession func(error), sessionEnd <-chan struct{}) {
 	}
 }
 
-func (c *Client) validateNamespace(namespace string) bool {
+func validateNamespace(decoder *parser.Decoder, namespace string) bool {
 	switch namespace {
 	case "", aliasRootNamespace:
 		return true
 	default:
 		log.Printf("socketio: unsupported namespace %q, discarding packet", namespace)
-		_ = c.decoder.DiscardLast()
+		_ = decoder.DiscardLast()
 
 		return false
 	}
 }
 
-func (c *Client) handleConnect() error {
-	if err := c.decoder.DiscardLast(); err != nil {
-		return err
-	}
-
-	c.setConnected(true)
-
-	if fn := c.onConnect; fn != nil {
-		go fn()
-	}
-
-	return nil
-}
-
-func (c *Client) handleDisconnect() error {
-	_, err := c.decoder.DecodeArgs([]reflect.Type{reflect.TypeOf("")})
+func (c *Client) handleDisconnect(s *session) error {
+	_, err := s.decoder.DecodeArgs([]reflect.Type{reflect.TypeOf("")})
 	if err != nil {
 		return err
 	}
 
-	c.setConnected(false)
-
 	return errServerDisconnect
 }
 
-func (c *Client) handleEvent(event string, header parser.Header) error {
+func (c *Client) handleEvent(s *session, event string, header parser.Header) error {
 	handler, ok := c.getEventHandler(event)
 	if !ok {
-		if err := c.decoder.DiscardLast(); err != nil {
+		if err := s.decoder.DiscardLast(); err != nil {
 			return err
 		}
 
 		if header.NeedAck {
-			return c.sendAck(header)
+			return c.sendAck(s, header)
 		}
 
 		return nil
 	}
 
-	args, err := c.decoder.DecodeArgs(handler.argTypes)
-	if err != nil {
-		return err
+	args, err := s.decoder.DecodeArgs(handler.argTypes)
+	if err == nil {
+		err = handler.Call(args)
 	}
 
-	if err := handler.Call(args); err != nil {
-		return err
+	if err != nil {
+		fn := c.onEventError
+		if fn == nil {
+			return err
+		}
+
+		fn(event, err)
 	}
 
 	if header.NeedAck {
-		return c.sendAck(header)
+		return c.sendAck(s, header)
 	}
 
 	return nil
 }
 
-func (c *Client) sendAck(header parser.Header) error {
+// sendAck answers on the session the event arrived on. An ack id means nothing on any other connection, so once
+// that session has ended the ack is dropped instead of waiting for the next one.
+func (c *Client) sendAck(s *session, header parser.Header) error {
 	ack := parser.Payload{
 		Header: parser.Header{
 			Type:    parser.Ack,
@@ -427,12 +585,7 @@ func (c *Client) sendAck(header parser.Header) error {
 		},
 	}
 
-	select {
-	case c.writeChan <- ack:
-		return nil
-	case <-c.quitChan:
-		return ErrNotConnected
-	}
+	return c.send(s, ack)
 }
 
 func (c *Client) getEventHandler(event string) (*eventHandler, bool) {
@@ -444,18 +597,11 @@ func (c *Client) getEventHandler(event string) (*eventHandler, bool) {
 	return handler, ok
 }
 
-func (c *Client) setConnected(connected bool) {
+func (c *Client) currentSession() *session {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.connected = connected
-}
-
-func (c *Client) isConnected() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	return c.connected
+	return c.current
 }
 
 const (
@@ -466,4 +612,6 @@ const (
 var (
 	errServerDisconnect = errors.New("socketio: server disconnect")
 	errTransportLost    = errors.New("socketio: transport connection lost")
+	errConnectTimeout   = errors.New("socketio: timed out waiting for the server to accept the connection")
+	errClientClosed     = errors.New("socketio: client closed")
 )

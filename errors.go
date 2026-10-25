@@ -1,6 +1,9 @@
 package socketio
 
-import "errors"
+import (
+	"encoding/json"
+	"errors"
+)
 
 var (
 	// ErrEmptyAddr is returned when NewClient receives an empty address.
@@ -11,4 +14,39 @@ var (
 
 	// ErrAlreadyConnected is returned when Connect is called more than once.
 	ErrAlreadyConnected = errors.New("socketio: client already connected")
+
+	// ErrReconnectRequested is what OnDisconnect receives when the session ended because Reconnect was called.
+	ErrReconnectRequested = errors.New("socketio: reconnect requested")
+
+	// ErrInvalidOption is returned by NewClient when an option is given an invalid value.
+	ErrInvalidOption = errors.New("socketio: invalid option")
 )
+
+// ConnectError is the server refusing the Socket.IO connection, typically from a middleware. It reaches
+// OnReconnectAttempt like any other failed attempt, and the client retries with backoff.
+type ConnectError struct {
+	Message string
+	Data    json.RawMessage
+}
+
+func (e *ConnectError) Error() string {
+	return "socketio: connect error: " + e.Message
+}
+
+// newConnectError reads the CONNECT_ERROR payload: {"message", "data"} since Socket.IO v3, a bare string before.
+func newConnectError(raw []byte) *ConnectError {
+	var payload struct {
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &payload); err == nil {
+		return &ConnectError{Message: payload.Message, Data: payload.Data}
+	}
+
+	var message string
+	if err := json.Unmarshal(raw, &message); err == nil {
+		return &ConnectError{Message: message}
+	}
+
+	return &ConnectError{Message: string(raw)}
+}
