@@ -372,7 +372,151 @@ func TestClientCloseDuringHandshake(t *testing.T) {
 	select {
 	case <-server.conns:
 		t.Fatal("client reconnected after Close")
-	case <-time.After(initialBackoff + 500*time.Millisecond):
+	case <-time.After(defaultInitialBackoff + 500*time.Millisecond):
 	}
 	require.Zero(t, attempts.Load())
+}
+
+func TestClientReconnectRequested(t *testing.T) {
+	server := newFakeServer(t, nil)
+
+	inHandler := make(chan struct{})
+	release := make(chan struct{})
+	handlerDone := make(chan struct{})
+	disconnectErrs := make(chan error, 4)
+
+	client, connected := newConnectedClient(t, server, func(c *Client) {
+		c.OnDisconnect(func(err error) { disconnectErrs <- err })
+		c.On("slow", func(string) {
+			close(inHandler)
+			<-release
+			close(handlerDone)
+		})
+	})
+
+	first := server.nextConn(t)
+	waitSignal(t, connected, "OnConnect")
+
+	require.NoError(t, first.send(`27["slow","x"]`))
+	waitSignal(t, inHandler, "handler start")
+
+	require.NoError(t, client.Reconnect())
+
+	select {
+	case err := <-disconnectErrs:
+		require.ErrorIs(t, err, ErrReconnectRequested)
+	case <-time.After(waitTimeout):
+		t.Fatal("OnDisconnect not called")
+	}
+	first.waitClosed(t)
+
+	second := server.nextConn(t)
+	waitSignal(t, connected, "OnConnect after Reconnect")
+
+	close(release)
+	waitSignal(t, handlerDone, "handler end")
+
+	// The ack for id 7 belonged to the first connection.
+	require.NoError(t, client.Emit("after"))
+	require.Equal(t, "2[\"after\"]\n", second.nextPacket(t))
+	require.NoError(t, second.send(`28["nobody_listens"]`))
+	require.Equal(t, "38", second.nextPacket(t))
+}
+
+func TestClientBackoffSequence(t *testing.T) {
+	// A listener that is gone refuses every dial, so each attempt fails at once and only the waits remain.
+	gone := httptest.NewServer(http.NotFoundHandler())
+	url := gone.URL
+	gone.Close()
+
+	client, err := NewClient(url, WithReconnectBackoff(50*time.Millisecond, 200*time.Millisecond, 0))
+	require.NoError(t, err)
+
+	delays := make(chan time.Duration, 16)
+	client.OnReconnectAttempt(func(_ int, backoff time.Duration, _ error) { delays <- backoff })
+
+	require.NoError(t, client.Connect())
+	t.Cleanup(func() { _ = client.Close() })
+
+	want := []time.Duration{50, 100, 200, 200, 200}
+	for i, w := range want {
+		select {
+		case d := <-delays:
+			require.Equal(t, w*time.Millisecond, d, "attempt %d", i+1)
+		case <-time.After(waitTimeout):
+			t.Fatalf("attempt %d not reported", i+1)
+		}
+	}
+}
+
+func TestClientEventErrorHandlerKeepsSession(t *testing.T) {
+	server := newFakeServer(t, nil)
+
+	type eventError struct {
+		event string
+		err   error
+	}
+	eventErrs := make(chan eventError, 4)
+
+	client, err := NewClient(server.url(), WithEventErrorHandler(func(event string, err error) {
+		eventErrs <- eventError{event, err}
+	}))
+	require.NoError(t, err)
+
+	connected := make(chan struct{}, 4)
+	client.OnConnect(func() { connected <- struct{}{} })
+	client.On("boom", func() { panic("handler exploded") })
+	client.On("typed", func(int) {})
+
+	require.NoError(t, client.Connect())
+	t.Cleanup(func() { _ = client.Close() })
+
+	conn := server.nextConn(t)
+	waitSignal(t, connected, "OnConnect")
+
+	for _, test := range []struct {
+		packet, event, ack string
+	}{
+		{`21["boom"]`, "boom", "31"},
+		{`22["typed","not a number"]`, "typed", "32"},
+	} {
+		require.NoError(t, conn.send(test.packet))
+
+		select {
+		case got := <-eventErrs:
+			require.Equal(t, test.event, got.event)
+			require.Error(t, got.err)
+		case <-time.After(waitTimeout):
+			t.Fatalf("error handler not called for %s", test.event)
+		}
+
+		require.Equal(t, test.ack, conn.nextPacket(t), "the ack still goes out for %s", test.event)
+	}
+
+	// Same connection, still reading: no reconnect happened.
+	require.NoError(t, conn.send(`23["nobody_listens"]`))
+	require.Equal(t, "33", conn.nextPacket(t))
+	select {
+	case <-server.conns:
+		t.Fatal("client reconnected")
+	default:
+	}
+}
+
+func TestClientHandlerPanicEndsSessionByDefault(t *testing.T) {
+	server := newFakeServer(t, nil)
+
+	_, connected := newConnectedClient(t, server, func(c *Client) {
+		c.On("boom", func() { panic("handler exploded") })
+	})
+
+	first := server.nextConn(t)
+	waitSignal(t, connected, "OnConnect")
+
+	// Unchanged behavior without WithEventErrorHandler: no ack, the session ends and the client reconnects.
+	require.NoError(t, first.send(`21["boom"]`))
+	first.waitClosed(t)
+
+	server.nextConn(t)
+	waitSignal(t, connected, "OnConnect after reconnect")
 }

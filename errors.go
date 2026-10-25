@@ -14,6 +14,12 @@ var (
 
 	// ErrAlreadyConnected is returned when Connect is called more than once.
 	ErrAlreadyConnected = errors.New("socketio: client already connected")
+
+	// ErrReconnectRequested is what OnDisconnect receives when the session ended because Reconnect was called.
+	ErrReconnectRequested = errors.New("socketio: reconnect requested")
+
+	// ErrInvalidOption is returned by NewClient when an option is given an invalid value.
+	ErrInvalidOption = errors.New("socketio: invalid option")
 )
 
 // ConnectError is the server refusing the Socket.IO connection, typically from a middleware. It reaches

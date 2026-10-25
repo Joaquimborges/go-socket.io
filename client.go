@@ -3,6 +3,7 @@ package socketio
 import (
 	"errors"
 	"log"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"path"
@@ -19,8 +20,8 @@ import (
 )
 
 const (
-	maxReconnectBackoff = 30 * time.Second
-	initialBackoff      = time.Second
+	defaultMaxBackoff     = 30 * time.Second
+	defaultInitialBackoff = time.Second
 
 	// connectTimeout bounds the wait for the server to accept the Socket.IO connection, as the JS client's
 	// default timeout does.
@@ -31,6 +32,13 @@ const (
 type Client struct {
 	url     string
 	headers http.Header
+
+	initialBackoff time.Duration
+	maxBackoff     time.Duration
+	jitter         float64
+
+	// optErr is the first invalid option, reported by NewClient.
+	optErr error
 
 	quitChan  chan struct{}
 	closeOnce sync.Once
@@ -52,6 +60,7 @@ type Client struct {
 	onConnect          func()
 	onDisconnect       func(err error)
 	onReconnectAttempt func(attempt int, backoff time.Duration, err error)
+	onEventError       func(event string, err error)
 }
 
 // session is one accepted Socket.IO connection. Everything its loops read and write travels with it, so a loop
@@ -102,12 +111,18 @@ func NewClient(addr string, opts ...ClientOption) (*Client, error) {
 	}
 
 	client := &Client{
-		url:    u.String(),
-		events: make(map[string]*eventHandler),
+		url:            u.String(),
+		events:         make(map[string]*eventHandler),
+		initialBackoff: defaultInitialBackoff,
+		maxBackoff:     defaultMaxBackoff,
 	}
 
 	for _, opt := range opts {
 		opt(client)
+	}
+
+	if client.optErr != nil {
+		return nil, client.optErr
 	}
 
 	return client, nil
@@ -165,20 +180,37 @@ func (c *Client) OnDisconnect(f func(err error)) {
 	c.onDisconnect = f
 }
 
-// OnReconnectAttempt registers a callback invoked when a connection attempt fails before backoff. A server that
-// refuses the connection reports a *ConnectError here.
+// OnReconnectAttempt registers a callback invoked when a connection attempt fails, with the wait before the
+// next one. A server that refuses the connection reports a *ConnectError here.
 func (c *Client) OnReconnectAttempt(f func(attempt int, backoff time.Duration, err error)) {
 	c.onReconnectAttempt = f
 }
 
-// Emit sends an event with JSON-encoded arguments.
-func (c *Client) Emit(event string, args ...interface{}) error {
+// Reconnect ends the current session and lets the client connect again after the initial backoff, as after a
+// dropped transport. OnDisconnect receives ErrReconnectRequested. It is meant for a liveness check of the
+// caller's own, such as an application heartbeat that went silent while the transport still looks open.
+//
+// Without an accepted session — before Connect, while waiting to retry, or after Close — it returns
+// ErrNotConnected and does nothing.
+func (c *Client) Reconnect() error {
 	s := c.currentSession()
 	if s == nil {
 		return ErrNotConnected
 	}
 
-	data := make([]interface{}, len(args)+1)
+	s.end(ErrReconnectRequested)
+
+	return nil
+}
+
+// Emit sends an event with JSON-encoded arguments.
+func (c *Client) Emit(event string, args ...any) error {
+	s := c.currentSession()
+	if s == nil {
+		return ErrNotConnected
+	}
+
+	data := make([]any, len(args)+1)
 	data[0] = event
 	copy(data[1:], args)
 
@@ -203,7 +235,7 @@ func (c *Client) send(s *session, pkg parser.Payload) error {
 }
 
 func (c *Client) run() {
-	backoff := initialBackoff
+	backoff := c.initialBackoff
 	reconnectAttempt := 0
 
 	for {
@@ -218,11 +250,12 @@ func (c *Client) run() {
 			}
 
 			reconnectAttempt++
+			delay := nextDelay(backoff, c.jitter, rand.Float64())
 			if fn := c.onReconnectAttempt; fn != nil {
-				fn(reconnectAttempt, backoff, err)
+				fn(reconnectAttempt, delay, err)
 			}
 
-			if !c.waitBackoff(&backoff) {
+			if !c.waitBackoff(&backoff, delay) {
 				return
 			}
 
@@ -230,7 +263,7 @@ func (c *Client) run() {
 		}
 
 		reconnectAttempt = 0
-		backoff = initialBackoff
+		backoff = c.initialBackoff
 
 		if fn := c.onConnect; fn != nil {
 			go fn()
@@ -259,14 +292,15 @@ func (c *Client) run() {
 			}(err)
 		}
 
-		if !c.waitBackoff(&backoff) {
+		if !c.waitBackoff(&backoff, nextDelay(backoff, c.jitter, rand.Float64())) {
 			return
 		}
 	}
 }
 
-func (c *Client) waitBackoff(backoff *time.Duration) bool {
-	timer := time.NewTimer(*backoff)
+// waitBackoff waits delay, then doubles backoff up to the maximum. It returns false when Close stops the wait.
+func (c *Client) waitBackoff(backoff *time.Duration, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
 	defer timer.Stop()
 
 	select {
@@ -276,11 +310,17 @@ func (c *Client) waitBackoff(backoff *time.Duration) bool {
 	}
 
 	*backoff *= 2
-	if *backoff > maxReconnectBackoff {
-		*backoff = maxReconnectBackoff
+	if *backoff > c.maxBackoff {
+		*backoff = c.maxBackoff
 	}
 
 	return true
+}
+
+// nextDelay draws the wait for backoff from (backoff×(1−jitter), backoff], given r in [0, 1). With no jitter it is
+// backoff itself.
+func nextDelay(backoff time.Duration, jitter, r float64) time.Duration {
+	return backoff - time.Duration(float64(backoff)*jitter*r)
 }
 
 // connectOnce dials the transport and waits for the server to accept the Socket.IO connection. Only an accepted
@@ -514,12 +554,17 @@ func (c *Client) handleEvent(s *session, event string, header parser.Header) err
 	}
 
 	args, err := s.decoder.DecodeArgs(handler.argTypes)
-	if err != nil {
-		return err
+	if err == nil {
+		err = handler.Call(args)
 	}
 
-	if err := handler.Call(args); err != nil {
-		return err
+	if err != nil {
+		fn := c.onEventError
+		if fn == nil {
+			return err
+		}
+
+		fn(event, err)
 	}
 
 	if header.NeedAck {
