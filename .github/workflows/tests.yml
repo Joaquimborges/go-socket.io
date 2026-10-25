@@ -1,26 +1,33 @@
-name: CI
+name: Tests
+
+# The test stage. It runs on its own for every push to master, and is called by the pipeline as its first step,
+# so a pull request is tested the same way before any tag is pushed.
+on:
+  workflow_call:
+  push:
+    branches:
+      - master
+
 permissions:
   contents: read
 
-on:
-  push:
-    branches: [master]
-  pull_request:
-    branches: [master]
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-  build:
-    name: ubuntu Go 1.26
+  tests:
+    name: ubuntu Go
     timeout-minutes: 10
     runs-on: ubuntu-latest
-    steps:
-      - name: Check out code
-        uses: actions/checkout@v4
 
-      - name: Install Go
-        uses: actions/setup-go@v5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
         with:
-          go-version: '1.26'
+          go-version-file: go.mod
           cache: true
 
       - name: Check go version

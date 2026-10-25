@@ -1,0 +1,39 @@
+name: Release
+
+# The release stage: publishes the tag it is given as a GitHub release marked Latest. The pipeline calls it last,
+# after the tag was pushed: for every release candidate of a release pull request, and for the final version
+# once that pull request is merged.
+#
+# A tag this pipeline pushes never moves, so the release always describes the code the Go module proxy serves
+# for that version. Finding the release already there only marks it Latest again.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: The tag to publish, e.g. v1.1.0-rc.2 or v1.1.0
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Publish the release as Latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$REPO" --prerelease=false --latest
+          else
+            gh release create "$TAG" --repo "$REPO" --title "$TAG" --generate-notes --latest
+          fi
+
+          echo "Release published as Latest: \`$TAG\`" >> "$GITHUB_STEP_SUMMARY"

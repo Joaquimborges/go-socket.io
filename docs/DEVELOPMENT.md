@@ -57,7 +57,38 @@ CI toolchain:
 GOTOOLCHAIN=go1.26.2 golangci-lint run
 ```
 
-## Releases
+## CI and releases
 
-Versions follow semver. A release gets an entry in [CHANGELOG.md](../CHANGELOG.md) and a tag on the `master`
-merge commit, never on a feature branch.
+Three workflows in `.github/workflows/`, the same shape as the services' but adapted to a Go module. There is no
+`develop` branch: every pull request targets `master`.
+
+| Workflow | Runs |
+|---|---|
+| `tests.yml` | gofmt, `go mod tidy`, `go mod verify`, golangci-lint and `make test`. On every push to `master`, and as the pipeline's first stage |
+| `pipeline.yml` | On every push to a pull request into `master`: tests → tag → release. Each stage waits for the previous one |
+| `release.yml` | Publishes the tag it is given as the Latest GitHub release |
+
+| Pull request | Tag pushed on each push | GitHub release |
+|---|---|---|
+| From any branch, e.g. `feat/client-hardening` | `v0.0.N-client-hardening` | None |
+| From `release/X.Y.Z` | `vX.Y.Z-rc.N` | Latest |
+| `release/X.Y.Z` merged | `vX.Y.Z` on the merge commit | Latest |
+
+A branch tag lets a consumer try a pull request before it merges, with no `replace`:
+
+```bash
+go get github.com/Joaquimborges/go-socket.io@v0.0.1-client-hardening
+```
+
+To release:
+
+1. Move the version's `CHANGELOG.md` entry from "unreleased" to its date, on `release/X.Y.Z`.
+2. Open the pull request from `release/X.Y.Z` into `master`. `X.Y.Z` must be new and above every released version,
+   or the pipeline fails. Each push publishes a new release candidate.
+3. Merge it. The pipeline tags `vX.Y.Z` on the merge commit and publishes it as Latest.
+
+**Tags never move and are never deleted.** This module is public: the Go module proxy and checksum database keep
+the first content they see for a version, so a moved tag fails with a checksum mismatch for everyone who resolves
+it afterwards. That is why a candidate is `-rc.N`, a new tag on every push, instead of the services' single `-rc`
+tag moved with `git tag -f`. The final `vX.Y.Z` is needed because `go get @latest` skips pre-releases once any
+release exists.
